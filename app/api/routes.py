@@ -5,6 +5,12 @@ from app.database.database import get_db
 from app.schemas.drone import DroneCreate, DroneResponse
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
+from app.services.health_monitor import get_health_status
+from app.services.alerts import generate_alerts
+from app.services.drone_analytics import (
+    calculate_risk_score,
+    calculate_analytics
+)
 from app.schemas.telemetry import (
     TelemetryCreate,
     TelemetryResponse
@@ -56,4 +62,73 @@ def read_telemetry(
     return telemetry_crud.get_telemetry_by_drone(
         db,
         drone_id
+    )
+@router.get("/drone/{id}/status")
+def get_drone_status(
+    id: int,
+    db: Session = Depends(get_db)
+):
+    telemetry_records = telemetry_crud.get_telemetry_by_drone(
+        db,
+        id
+    )
+
+    if not telemetry_records:
+        raise HTTPException(
+            status_code=404,
+            detail="No telemetry found for drone"
+        )
+
+    latest = telemetry_records[-1]
+
+    health = get_health_status(
+        latest.battery,
+        latest.temperature
+    )
+
+    alerts = generate_alerts(
+        latest.battery,
+        latest.temperature
+    )
+
+    risk_score = calculate_risk_score(
+        latest.battery,
+        latest.temperature,
+        latest.speed
+    )
+
+    return {
+        "drone_id": id,
+        "health": health,
+        "risk_score": risk_score,
+        "alerts": alerts,
+        "latest_telemetry": {
+            "battery": latest.battery,
+            "temperature": latest.temperature,
+            "speed": latest.speed,
+            "altitude": latest.altitude,
+            "latitude": latest.latitude,
+            "longitude": latest.longitude
+        }
+    }
+@router.get("/drone/{id}/analytics")
+def get_drone_analytics(
+    id: int,
+    db: Session = Depends(get_db)
+):
+    telemetry_records = (
+        telemetry_crud.get_telemetry_by_drone(
+            db,
+            id
+        )
+    )
+
+    if not telemetry_records:
+        raise HTTPException(
+            status_code=404,
+            detail="No telemetry found"
+        )
+
+    return calculate_analytics(
+        telemetry_records
     )
