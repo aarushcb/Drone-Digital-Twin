@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database.database import Base, engine
-from app.models import user, drone, telemetry  # noqa: F401 — import so tables register
+from app.models import user, drone, telemetry, scene_object  # noqa: F401 — import so tables register
 from app.api.routes import router as drone_router
 from app.api.auth import router as auth_router
 from app.api.ws import router as ws_router

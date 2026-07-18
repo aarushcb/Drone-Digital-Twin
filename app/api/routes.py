@@ -23,8 +23,10 @@ from app.api.deps import get_current_user
 from app.models.user import User
 from app.schemas.drone import DroneCreate, DroneOut, DroneUpdate
 from app.schemas.telemetry import TelemetryCreate, TelemetryOut
+from app.schemas.scene_object import SceneObjectCreate, SceneObjectOut
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
+from app.crud import scene_object as scene_object_crud
 from app.services.health_monitor import get_health_status
 from app.services.alerts import generate_alerts
 from app.services.drone_analytics import calculate_risk_score, calculate_analytics
@@ -204,3 +206,55 @@ def get_drone_analytics(
         raise HTTPException(status_code=404, detail="No telemetry found")
 
     return calculate_analytics(records)
+
+
+# ---------- Scene objects (obstacles, landing points, path waypoints) ----------
+# WHY THESE ARE SEPARATE FROM TELEMETRY:
+# Telemetry is data ABOUT the drone (where it is, how it's doing).
+# Scene objects are data about the ENVIRONMENT the drone operates in --
+# set up once by the user, not streamed continuously. Different lifecycle,
+# different endpoints.
+
+@router.post("/drones/{drone_id}/objects", response_model=SceneObjectOut, status_code=201)
+def create_scene_object(
+    drone_id: int,
+    obj: SceneObjectCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    return scene_object_crud.create_scene_object(db, obj, drone_id=drone_id)
+
+
+@router.get("/drones/{drone_id}/objects", response_model=List[SceneObjectOut])
+def list_scene_objects(
+    drone_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    return scene_object_crud.get_scene_objects(db, drone_id)
+
+
+@router.delete("/drones/{drone_id}/objects/{object_id}", status_code=204)
+def delete_scene_object(
+    drone_id: int,
+    object_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    db_obj = scene_object_crud.get_scene_object(db, object_id, drone_id)
+    if db_obj is None:
+        raise HTTPException(status_code=404, detail="Scene object not found")
+    scene_object_crud.delete_scene_object(db, db_obj)
+
+
+@router.delete("/drones/{drone_id}/objects", status_code=204)
+def clear_scene_objects(
+    drone_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    scene_object_crud.delete_all_scene_objects(db, drone_id)

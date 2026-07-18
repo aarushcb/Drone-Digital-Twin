@@ -43,3 +43,4 @@ class Drone(Base):
 
     owner = relationship("User", back_populates="drones")
     telemetry = relationship("Telemetry", back_populates="drone", cascade="all, delete-orphan")
+    scene_objects = relationship("SceneObject", back_populates="drone", cascade="all, delete-orphan")
