@@ -28,6 +28,7 @@ from app.crud import telemetry as telemetry_crud
 from app.services.health_monitor import get_health_status
 from app.services.alerts import generate_alerts
 from app.services.drone_analytics import calculate_risk_score, calculate_analytics
+from app.services.telemetry_broadcaster import manager
 
 router = APIRouter()
 
@@ -93,14 +94,42 @@ def delete_drone(
 # ---------- Telemetry ----------
 
 @router.post("/drones/{drone_id}/telemetry", response_model=TelemetryOut, status_code=201)
-def create_telemetry(
+async def create_telemetry(
     drone_id: int,
     telemetry: TelemetryCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     _get_owned_drone_or_404(db, drone_id, current_user)
-    return telemetry_crud.create_telemetry(db, telemetry, drone_id=drone_id)
+    db_telemetry = telemetry_crud.create_telemetry(db, telemetry, drone_id=drone_id)
+
+    # Push this new reading to anyone currently watching this drone's
+    # live view (see app/api/ws.py). If nobody's connected right now,
+    # broadcast() just does nothing -- this never blocks or fails the
+    # actual save, which already succeeded above.
+    #
+    # NOTE: this route is `async def` (unlike the other endpoints) purely
+    # so we can `await manager.broadcast(...)`. The database calls inside
+    # it are still the same synchronous SQLAlchemy calls as everywhere
+    # else -- fine at this app's current scale, but worth knowing: heavy
+    # concurrent traffic would eventually want a fully async DB setup.
+    await manager.broadcast(drone_id, {
+        "latitude": db_telemetry.latitude,
+        "longitude": db_telemetry.longitude,
+        "altitude": db_telemetry.altitude,
+        "battery": db_telemetry.battery,
+        "speed": db_telemetry.speed,
+        "temperature": db_telemetry.temperature,
+        "roll": db_telemetry.roll,
+        "pitch": db_telemetry.pitch,
+        "yaw": db_telemetry.yaw,
+        "flight_state": db_telemetry.flight_state,
+        "timestamp": db_telemetry.timestamp.isoformat(),
+        "drone_id": drone_id,
+        "id": db_telemetry.id,
+    })
+
+    return db_telemetry
 
 
 @router.get("/drones/{drone_id}/telemetry", response_model=List[TelemetryOut])
