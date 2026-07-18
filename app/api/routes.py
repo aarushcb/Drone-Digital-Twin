@@ -24,6 +24,7 @@ from app.models.user import User
 from app.schemas.drone import DroneCreate, DroneOut, DroneUpdate
 from app.schemas.telemetry import TelemetryCreate, TelemetryOut
 from app.schemas.scene_object import SceneObjectCreate, SceneObjectOut
+from app.schemas.path_plan import PathPlanRequest, PathPlanResponse, PathPoint
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
 from app.crud import scene_object as scene_object_crud
@@ -31,6 +32,7 @@ from app.services.health_monitor import get_health_status
 from app.services.alerts import generate_alerts
 from app.services.drone_analytics import calculate_risk_score, calculate_analytics
 from app.services.telemetry_broadcaster import manager
+from app.services.path_planner import plan_path, path_distance_meters
 
 router = APIRouter()
 
@@ -258,3 +260,64 @@ def clear_scene_objects(
 ):
     _get_owned_drone_or_404(db, drone_id, current_user)
     scene_object_crud.delete_all_scene_objects(db, drone_id)
+
+
+# ---------- Path planning ----------
+# WHY THIS USES THE DRONE'S PLACED "landing" OBJECT AS THE GOAL:
+# Rather than requiring a separate goal input, this reuses whatever
+# landing point the user already placed in the 3D view (Phase 7) -- one
+# consistent source of truth for "where is this drone supposed to end up."
+# If more than one landing point exists, the first one placed is used.
+#
+# COORDINATE SYSTEM CAVEAT: this operates in the same simplified "scene
+# units" as obstacles/landing points, not real-world GPS meters. Distance
+# and time estimates below are only as meaningful as that scene's scale is
+# consistent with the drone's real specs -- treated as an approximation
+# for now, not survey-grade navigation output.
+
+@router.post("/drones/{drone_id}/plan-path", response_model=PathPlanResponse)
+def plan_drone_path(
+    drone_id: int,
+    request: PathPlanRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
+
+    scene_objects = scene_object_crud.get_scene_objects(db, drone_id)
+    obstacles = [(o.x, o.z) for o in scene_objects if o.object_type == "obstacle"]
+    landing_points = [o for o in scene_objects if o.object_type == "landing"]
+
+    if not landing_points:
+        raise HTTPException(
+            status_code=404,
+            detail="No landing point set for this drone. Place one in the 3D view first.",
+        )
+
+    goal = (landing_points[0].x, landing_points[0].z)
+    start = (request.start_x, request.start_z)
+
+    try:
+        path = plan_path(start=start, goal=goal, obstacles=obstacles)
+    except ValueError as e:
+        # Start or goal is literally inside an obstacle's safety radius --
+        # a specific, actionable error rather than a generic 500.
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if path is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid path found — the landing point may be fully enclosed by obstacles.",
+        )
+
+    distance = path_distance_meters(path)
+
+    estimated_time = None
+    if db_drone.max_speed_mps and db_drone.max_speed_mps > 0:
+        estimated_time = distance / db_drone.max_speed_mps
+
+    return PathPlanResponse(
+        path=[PathPoint(x=p[0], z=p[1]) for p in path],
+        distance_meters=round(distance, 2),
+        estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
+    )
