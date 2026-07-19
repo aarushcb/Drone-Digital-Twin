@@ -28,11 +28,15 @@ from app.schemas.path_plan import PathPlanRequest, PathPlanResponse, PathPoint
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
 from app.crud import scene_object as scene_object_crud
-from app.services.health_monitor import get_health_status
 from app.services.alerts import generate_alerts
-from app.services.drone_analytics import calculate_risk_score, calculate_analytics
+from app.services.drone_analytics import calculate_analytics
 from app.services.telemetry_broadcaster import manager
 from app.services.path_planner import plan_path, path_distance_meters
+from app.services.predictive_analytics import (
+    estimate_battery_remaining,
+    detect_anomalies,
+    calculate_predictive_risk_score,
+)
 
 router = APIRouter()
 
@@ -162,21 +166,44 @@ def get_drone_status(
 ):
     _get_owned_drone_or_404(db, drone_id, current_user)
 
-    latest_records = telemetry_crud.get_telemetry(db, drone_id, limit=1)
-    if not latest_records:
+    # Fetch the latest reading PLUS recent history -- the old version only
+    # ever looked at a single snapshot in time, which is exactly why it
+    # could only do flat threshold checks. Predictions and anomaly
+    # detection need to see a window of recent behavior, not just "now."
+    records = telemetry_crud.get_telemetry(db, drone_id, limit=51)
+    if not records:
         raise HTTPException(status_code=404, detail="No telemetry found for drone")
 
-    latest = latest_records[0]
+    latest = records[0]
+    history = records[1:]  # everything except the current reading itself
 
-    health = get_health_status(latest.battery, latest.temperature)
+    battery_estimate = estimate_battery_remaining(history + [latest])
+    anomalies = detect_anomalies(latest, history)
+    risk_score = calculate_predictive_risk_score(latest, history, battery_estimate)
+
+    # health label kept simple and directly tied to the same risk_score,
+    # so the two never contradict each other the way two separately
+    # computed values could.
+    if risk_score >= 70:
+        health = "CRITICAL"
+    elif risk_score >= 40:
+        health = "WARNING"
+    else:
+        health = "GOOD"
+
+    # Legacy threshold-based alerts kept alongside the new anomaly list --
+    # "battery below 20%" is still worth saying plainly even though it's
+    # not novel, and the statistical anomalies add genuinely new
+    # information on top rather than replacing something that still works.
     alerts = generate_alerts(latest.battery, latest.temperature)
-    risk_score = calculate_risk_score(latest.battery, latest.temperature, latest.speed)
 
     return {
         "drone_id": drone_id,
         "health": health,
         "risk_score": risk_score,
         "alerts": alerts,
+        "anomalies": anomalies,
+        "battery_estimate": battery_estimate,
         "latest_telemetry": {
             "battery": latest.battery,
             "temperature": latest.temperature,
