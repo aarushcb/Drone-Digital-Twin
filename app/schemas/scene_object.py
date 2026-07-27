@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Optional
 from datetime import datetime
 
-VALID_OBJECT_TYPES = {"obstacle", "landing", "path"}
+VALID_OBJECT_TYPES = {"obstacle", "landing", "path", "building", "tree"}
 
 
 class SceneObjectCreate(BaseModel):
