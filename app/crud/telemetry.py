@@ -49,3 +49,17 @@ def get_telemetry(
         .limit(limit)
         .all()
     )
+
+
+def delete_all_telemetry(db: Session, drone_id: int) -> int:
+    """
+    Deletes every telemetry reading logged for a drone -- used by the
+    "Clear history" feature, so testing doesn't leave permanently
+    accumulating scattered data (this is exactly what caused the tangled,
+    multi-session flight paths in Flight Verification before). Returns
+    the number of rows deleted, mainly useful for confirming the delete
+    actually did something.
+    """
+    deleted_count = db.query(Telemetry).filter(Telemetry.drone_id == drone_id).delete()
+    db.commit()
+    return deleted_count

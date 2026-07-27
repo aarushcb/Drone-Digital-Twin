@@ -156,6 +156,24 @@ def read_telemetry(
     )
 
 
+@router.delete("/drones/{drone_id}/telemetry", status_code=200)
+def clear_telemetry(
+    drone_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Deletes ALL telemetry history for this drone -- lets you start fresh
+    for testing (e.g. before recording a clean flight for Flight
+    Verification) instead of accumulating scattered readings across every
+    past session forever. Does not delete the drone itself, its specs, or
+    any placed scene objects (obstacles/landing/path) -- only telemetry.
+    """
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    deleted_count = telemetry_crud.delete_all_telemetry(db, drone_id)
+    return {"deleted_count": deleted_count}
+
+
 # ---------- Status / analytics (existing rule-based logic, now owner-scoped) ----------
 
 @router.get("/drones/{drone_id}/status")
