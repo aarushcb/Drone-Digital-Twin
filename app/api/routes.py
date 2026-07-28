@@ -37,6 +37,7 @@ from app.services.predictive_analytics import (
     detect_anomalies,
     calculate_predictive_risk_score,
 )
+from app.services.digital_twin import compute_digital_twin_stats
 
 router = APIRouter()
 
@@ -366,3 +367,53 @@ def plan_drone_path(
         distance_meters=round(distance, 2),
         estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
     )
+
+
+# ---------- Digital Twin (lifetime aggregation, wear & maintenance) ----------
+# WHY THIS IS SEPARATE FROM /status AND /analytics:
+# Those look at a single point in time or a single recent session. This
+# looks at the drone's ENTIRE recorded history to answer a different
+# question: how much has this specific physical drone actually been used
+# over its whole life, and is it due for maintenance -- the actual "digital
+# twin" concept (a persistent virtual counterpart tracking real-world wear),
+# not just a live dashboard.
+
+@router.get("/drones/{drone_id}/digital-twin")
+def get_digital_twin(
+    drone_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
+
+    # Capped at 2000 readings -- a documented approximation for
+    # extremely long-lived drones with more history than that, same
+    # honest-limitation pattern used elsewhere (e.g. Flight Verification's
+    # 500-reading cap for finding the "first-ever" GPS position).
+    all_readings = telemetry_crud.get_telemetry(db, drone_id, limit=2000)
+    all_readings.sort(key=lambda t: t.timestamp)  # oldest-first, required by compute_digital_twin_stats
+
+    readings_as_dicts = [
+        {
+            "timestamp": t.timestamp,
+            "battery": t.battery,
+            "latitude": t.latitude,
+            "longitude": t.longitude,
+        }
+        for t in all_readings
+    ]
+
+    stats = compute_digital_twin_stats(readings_as_dicts)
+
+    return {
+        "drone_id": drone_id,
+        "specs": {
+            "frame_type": db_drone.frame_type,
+            "mass_kg": db_drone.mass_kg,
+            "motor_count": db_drone.motor_count,
+            "max_thrust_n": db_drone.max_thrust_n,
+            "battery_capacity_mah": db_drone.battery_capacity_mah,
+            "max_speed_mps": db_drone.max_speed_mps,
+        },
+        **stats,
+    }
