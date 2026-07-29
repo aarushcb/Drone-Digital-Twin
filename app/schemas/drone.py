@@ -16,6 +16,9 @@ SPEC_LIMITS = {
     "motor_count": (1, 16),                  # single-rotor to large heavy-lift multirotors
     "max_thrust_n": (0, 3000),               # generous upper bound for large industrial drones
     "battery_capacity_mah": (50, 100000),    # tiny micro drone to large ag-drone battery packs
+    "propeller_diameter_in": (1, 40),        # 2" micro-whoop props to 40" heavy-lift industrial props
+    "motor_kv": (30, 3000),                  # 30KV large cinema/heavy-lift motors to 3000KV micro racing motors
+    "battery_cells": (1, 16),                # 1S micro-whoop to 16S large industrial LiPo packs
 }
 
 
@@ -31,6 +34,14 @@ def _validate_range(field_name: str, value):
     return value
 
 
+# WHY ONE SHARED VALIDATOR COVERING ALL EIGHT FIELDS, INSTEAD OF ONE PER
+# FIELD (the pattern used before this file was rewritten): pydantic v2
+# lets a single @field_validator decorator list multiple field names --
+# this does the exact same range check as before, just without repeating
+# near-identical validator methods eight times across two classes.
+_RANGE_CHECKED_FIELDS = list(SPEC_LIMITS.keys())
+
+
 class DroneCreate(BaseModel):
     name: str
     model: Optional[str] = None
@@ -41,30 +52,15 @@ class DroneCreate(BaseModel):
     battery_capacity_mah: Optional[float] = None
     max_speed_mps: Optional[float] = None
 
-    @field_validator("mass_kg")
-    @classmethod
-    def validate_mass(cls, v):
-        return _validate_range("mass_kg", v)
+    # Added for real propeller/motor physics (see app/services/motor_performance.py):
+    propeller_diameter_in: Optional[float] = None
+    motor_kv: Optional[int] = None
+    battery_cells: Optional[int] = None
 
-    @field_validator("max_speed_mps")
+    @field_validator(*_RANGE_CHECKED_FIELDS)
     @classmethod
-    def validate_speed(cls, v):
-        return _validate_range("max_speed_mps", v)
-
-    @field_validator("motor_count")
-    @classmethod
-    def validate_motor_count(cls, v):
-        return _validate_range("motor_count", v)
-
-    @field_validator("max_thrust_n")
-    @classmethod
-    def validate_thrust(cls, v):
-        return _validate_range("max_thrust_n", v)
-
-    @field_validator("battery_capacity_mah")
-    @classmethod
-    def validate_battery(cls, v):
-        return _validate_range("battery_capacity_mah", v)
+    def validate_spec_range(cls, v, info):
+        return _validate_range(info.field_name, v)
 
 
 class DroneUpdate(BaseModel):
@@ -78,31 +74,14 @@ class DroneUpdate(BaseModel):
     max_thrust_n: Optional[float] = None
     battery_capacity_mah: Optional[float] = None
     max_speed_mps: Optional[float] = None
+    propeller_diameter_in: Optional[float] = None
+    motor_kv: Optional[int] = None
+    battery_cells: Optional[int] = None
 
-    @field_validator("mass_kg")
+    @field_validator(*_RANGE_CHECKED_FIELDS)
     @classmethod
-    def validate_mass(cls, v):
-        return _validate_range("mass_kg", v)
-
-    @field_validator("max_speed_mps")
-    @classmethod
-    def validate_speed(cls, v):
-        return _validate_range("max_speed_mps", v)
-
-    @field_validator("motor_count")
-    @classmethod
-    def validate_motor_count(cls, v):
-        return _validate_range("motor_count", v)
-
-    @field_validator("max_thrust_n")
-    @classmethod
-    def validate_thrust(cls, v):
-        return _validate_range("max_thrust_n", v)
-
-    @field_validator("battery_capacity_mah")
-    @classmethod
-    def validate_battery(cls, v):
-        return _validate_range("battery_capacity_mah", v)
+    def validate_spec_range(cls, v, info):
+        return _validate_range(info.field_name, v)
 
 
 class DroneOut(BaseModel):
@@ -117,5 +96,8 @@ class DroneOut(BaseModel):
     max_thrust_n: Optional[float] = None
     battery_capacity_mah: Optional[float] = None
     max_speed_mps: Optional[float] = None
+    propeller_diameter_in: Optional[float] = None
+    motor_kv: Optional[int] = None
+    battery_cells: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)

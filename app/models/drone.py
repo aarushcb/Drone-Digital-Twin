@@ -41,6 +41,15 @@ class Drone(Base):
     battery_capacity_mah = Column(Float, nullable=True)
     max_speed_mps = Column(Float, nullable=True)         # meters/second
 
+    # Added for real propeller/motor physics (app/services/motor_performance.py) --
+    # these three, together, let us compute actual required RPM, real power
+    # draw, and estimated flight time using dimensional propeller thrust
+    # theory calibrated against published UIUC-derived coefficients --
+    # instead of only a relative percentage change like before.
+    propeller_diameter_in = Column(Float, nullable=True)  # inches, standard industry unit
+    motor_kv = Column(Integer, nullable=True)             # RPM per volt, standard motor rating
+    battery_cells = Column(Integer, nullable=True)        # LiPo "S" rating, e.g. 4 = 4S = 14.8V nominal
+
     owner = relationship("User", back_populates="drones")
     telemetry = relationship("Telemetry", back_populates="drone", cascade="all, delete-orphan")
     scene_objects = relationship("SceneObject", back_populates="drone", cascade="all, delete-orphan")

@@ -39,7 +39,8 @@ from app.services.predictive_analytics import (
     calculate_predictive_risk_score,
 )
 from app.services.digital_twin import compute_digital_twin_stats
-from app.services.environment_simulator import simulate_conditions
+from app.services.environment_simulator import simulate_conditions, air_density
+from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
 
 router = APIRouter()
 
@@ -437,7 +438,7 @@ def simulate_environment(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    _get_owned_drone_or_404(db, drone_id, current_user)
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
 
     recent_readings = telemetry_crud.get_telemetry(db, drone_id, limit=51)
     baseline_estimate = None
@@ -461,4 +462,25 @@ def simulate_environment(
     result["drone_id"] = drone_id
     result["altitude_m"] = request.altitude_m
     result["temperature_c"] = request.temperature_c
+
+    # WHY THIS IS ADDITIVE, NOT A REPLACEMENT: the relative percentage-
+    # change calculation above still works for every drone, specs or not.
+    # This ABSOLUTE analysis (real RPM, watts, amps, flight time) only
+    # runs when the drone has the full motor/propeller/battery spec set
+    # on file -- gracefully omitted (not a fake number) otherwise.
+    if has_complete_motor_specs(db_drone):
+        motor_analysis = analyze_motor_performance(
+            mass_kg=db_drone.mass_kg,
+            motor_count=db_drone.motor_count,
+            propeller_diameter_in=db_drone.propeller_diameter_in,
+            motor_kv=db_drone.motor_kv,
+            battery_cells=db_drone.battery_cells,
+            battery_capacity_mah=db_drone.battery_capacity_mah,
+            air_density=air_density(request.altitude_m, request.temperature_c),
+        )
+        motor_analysis["static_thrust_coefficient_used"] = CT_STATIC
+        result["motor_performance"] = motor_analysis
+    else:
+        result["motor_performance"] = None
+
     return result
