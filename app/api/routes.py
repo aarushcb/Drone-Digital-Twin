@@ -25,6 +25,7 @@ from app.schemas.drone import DroneCreate, DroneOut, DroneUpdate
 from app.schemas.telemetry import TelemetryCreate, TelemetryOut
 from app.schemas.scene_object import SceneObjectCreate, SceneObjectOut
 from app.schemas.path_plan import PathPlanRequest, PathPlanResponse, PathPoint
+from app.schemas.environment import EnvironmentSimulationRequest
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
 from app.crud import scene_object as scene_object_crud
@@ -38,6 +39,7 @@ from app.services.predictive_analytics import (
     calculate_predictive_risk_score,
 )
 from app.services.digital_twin import compute_digital_twin_stats
+from app.services.environment_simulator import simulate_conditions
 
 router = APIRouter()
 
@@ -417,3 +419,46 @@ def get_digital_twin(
         },
         **stats,
     }
+
+
+# ---------- Environment condition simulation ----------
+# WHY THIS REUSES THE DRONE'S OWN PHASE 9 BATTERY ESTIMATE AS A BASELINE:
+# Rather than inventing a flight-time number from scratch (which we
+# genuinely can't do precisely without real power-draw specs we don't
+# collect), this takes the drone's own EMPIRICALLY OBSERVED drain rate
+# and projects how established physics says it would change under
+# different conditions -- grounded in real data about this specific
+# drone, not a generic simulation.
+
+@router.post("/drones/{drone_id}/simulate-environment")
+def simulate_environment(
+    drone_id: int,
+    request: EnvironmentSimulationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _get_owned_drone_or_404(db, drone_id, current_user)
+
+    recent_readings = telemetry_crud.get_telemetry(db, drone_id, limit=51)
+    baseline_estimate = None
+    if recent_readings:
+        recent_readings_sorted = sorted(recent_readings, key=lambda t: t.timestamp)
+        baseline_estimate = estimate_battery_remaining(recent_readings_sorted)
+
+    baseline_drain_rate = None
+    if baseline_estimate and baseline_estimate.get("drain_rate_percent_per_min"):
+        # Only meaningful if the battery is actually draining (negative
+        # slope) -- a flat/charging baseline has nothing sensible to project.
+        rate = baseline_estimate["drain_rate_percent_per_min"]
+        if rate < 0:
+            baseline_drain_rate = -rate  # store as a positive "percent per minute drained"
+
+    result = simulate_conditions(
+        altitude_m=request.altitude_m,
+        temperature_c=request.temperature_c,
+        baseline_drain_rate_percent_per_min=baseline_drain_rate,
+    )
+    result["drone_id"] = drone_id
+    result["altitude_m"] = request.altitude_m
+    result["temperature_c"] = request.temperature_c
+    return result
