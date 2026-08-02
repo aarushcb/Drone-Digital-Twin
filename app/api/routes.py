@@ -45,6 +45,7 @@ from app.services.digital_twin import compute_digital_twin_stats
 from app.services.environment_simulator import simulate_conditions, air_density
 from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
 from app.services.bemt import analyze_bemt_hover
+from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 
 router = APIRouter()
@@ -546,8 +547,22 @@ def simulate_environment(
             battery_cells=db_drone.battery_cells,
             air_density=air_density(request.altitude_m, request.temperature_c),
         )
+
+        # WHY THIS IS ADDITIVE TOO: BEMT's own docstring is explicit that
+        # its blade geometry/airfoil constants are cited RANGES, not exact
+        # values -- this Monte Carlo-propagates that documented uncertainty
+        # through to required hover RPM, so the UI can show a confidence
+        # interval next to the single bemt_analysis point estimate instead
+        # of implying false precision.
+        result["hover_uncertainty"] = monte_carlo_hover_uncertainty(
+            mass_kg=db_drone.mass_kg,
+            motor_count=db_drone.motor_count,
+            propeller_diameter_in=db_drone.propeller_diameter_in,
+            air_density=air_density(request.altitude_m, request.temperature_c),
+        )
     else:
         result["motor_performance"] = None
         result["bemt_analysis"] = None
+        result["hover_uncertainty"] = None
 
     return result

@@ -103,23 +103,23 @@ NUM_BLADES = 2               # standard for multirotor propellers
 NUM_ELEMENTS = 40            # radial discretization for the blade integration
 
 
-def _local_twist_rad(r: float) -> float:
+def _local_twist_rad(r: float, theta_root_deg: float, theta_tip_deg: float) -> float:
     """Linear twist from root to tip, in radians, at nondimensional radius r (0-1)."""
-    theta_deg = THETA_ROOT_DEG + (THETA_TIP_DEG - THETA_ROOT_DEG) * r
+    theta_deg = theta_root_deg + (theta_tip_deg - theta_root_deg) * r
     return math.radians(theta_deg)
 
 
-def _tip_loss_factor(r: float, lam: float) -> float:
+def _tip_loss_factor(r: float, lam: float, num_blades: int) -> float:
     """Prandtl tip-loss factor F, given local inflow ratio lambda."""
     if r <= 0 or lam <= 1e-9:
         return 1.0
     phi = lam / r
-    f = (NUM_BLADES / 2) * (1 - r) / (r * phi)
+    f = (num_blades / 2) * (1 - r) / (r * phi)
     f = min(f, 50.0)  # guard against overflow in exp() for r -> 1 edge case
     return (2 / math.pi) * math.acos(max(-1.0, min(1.0, math.exp(-f))))
 
 
-def _local_inflow_ratio(r: float, sigma: float, theta: float) -> float:
+def _local_inflow_ratio(r: float, sigma: float, theta: float, cl_alpha: float, num_blades: int) -> float:
     """
     Closed-form combined blade-element/momentum inflow at radius r, with
     2 fixed-point iterations on the tip-loss factor F (F depends on
@@ -128,20 +128,31 @@ def _local_inflow_ratio(r: float, sigma: float, theta: float) -> float:
     F = 1.0
     lam = 0.0
     for _ in range(3):
-        inner = 1 + (32 * F * theta * r) / (sigma * CL_ALPHA_PER_RAD)
-        lam = (sigma * CL_ALPHA_PER_RAD) / (16 * F) * (math.sqrt(max(inner, 0.0)) - 1)
+        inner = 1 + (32 * F * theta * r) / (sigma * cl_alpha)
+        lam = (sigma * cl_alpha) / (16 * F) * (math.sqrt(max(inner, 0.0)) - 1)
         lam = max(lam, 1e-6)
-        F = _tip_loss_factor(r, lam)
+        F = _tip_loss_factor(r, lam, num_blades)
     return lam, F
 
 
-def hover_coefficients(num_blades: int = NUM_BLADES, chord_to_radius: float = CHORD_TO_RADIUS) -> dict:
+def hover_coefficients(
+    num_blades: int = NUM_BLADES,
+    chord_to_radius: float = CHORD_TO_RADIUS,
+    cl_alpha: float = CL_ALPHA_PER_RAD,
+    cd0: float = CD0,
+    theta_root_deg: float = THETA_ROOT_DEG,
+    theta_tip_deg: float = THETA_TIP_DEG,
+) -> dict:
     """
     Integrates blade-element/momentum theory across the blade (root cutout
-    to tip) to get the thrust and power coefficients CT, CP for the
-    representative blade geometry. These are purely geometric -- they do
-    NOT depend on RPM or air density (that's what makes hover BEMT in
-    non-dimensional form clean: CT/CP are constants of the blade shape).
+    to tip) to get the thrust and power coefficients CT, CP for the given
+    blade geometry/airfoil parameters (defaulting to the representative
+    values documented at the top of this file). These are purely
+    geometric -- they do NOT depend on RPM or air density (that's what
+    makes hover BEMT in non-dimensional form clean: CT/CP are constants of
+    the blade shape). The parameters are exposed here (rather than only
+    read from the module constants) so app/services/monte_carlo_uq.py can
+    resample them to propagate their documented uncertainty ranges.
     """
     sigma_local = (num_blades * chord_to_radius) / math.pi  # solidity is constant here since chord/R is constant
 
@@ -152,12 +163,12 @@ def hover_coefficients(num_blades: int = NUM_BLADES, chord_to_radius: float = CH
 
     for i in range(NUM_ELEMENTS):
         r = ROOT_CUTOUT + (i + 0.5) * dr  # midpoint rule
-        theta = _local_twist_rad(r)
-        lam, F = _local_inflow_ratio(r, sigma_local, theta)
+        theta = _local_twist_rad(r, theta_root_deg, theta_tip_deg)
+        lam, F = _local_inflow_ratio(r, sigma_local, theta, cl_alpha, num_blades)
 
         d_ct = 4 * F * lam ** 2 * r
         d_cp_i = lam * d_ct
-        d_cp_0 = (sigma_local * CD0 / 2) * r ** 3
+        d_cp_0 = (sigma_local * cd0 / 2) * r ** 3
 
         ct += d_ct * dr
         cp_induced += d_cp_i * dr
