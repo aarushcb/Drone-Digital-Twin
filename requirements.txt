@@ -11,3 +11,4 @@ pyjwt==2.10.1
 python-multipart==0.0.20
 psycopg2-binary==2.9.10
 alembic==1.14.0
+pymavlink==2.4.49

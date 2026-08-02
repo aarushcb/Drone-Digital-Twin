@@ -13,10 +13,13 @@ WHAT CHANGED FROM THE ORIGINAL:
   start/end date filtering — see crud/telemetry.py for why.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from datetime import datetime
+from dataclasses import asdict
+import tempfile
+import os
 
 from app.database.database import get_db
 from app.api.deps import get_current_user
@@ -41,6 +44,7 @@ from app.services.predictive_analytics import (
 from app.services.digital_twin import compute_digital_twin_stats
 from app.services.environment_simulator import simulate_conditions, air_density
 from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
+from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 
 router = APIRouter()
 
@@ -176,6 +180,54 @@ def clear_telemetry(
     _get_owned_drone_or_404(db, drone_id, current_user)
     deleted_count = telemetry_crud.delete_all_telemetry(db, drone_id)
     return {"deleted_count": deleted_count}
+
+
+# ---------- MAVLink flight log import ----------
+
+@router.post("/drones/{drone_id}/import-mavlink")
+async def import_mavlink_log(
+    drone_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Imports a real .tlog or .bin MAVLink flight log (from a PX4 or
+    ArduPilot-based drone) and inserts it as telemetry history for this
+    drone -- so a REAL flight can be replayed, verified, and analyzed
+    through the existing 3D replay, flight verification, and analytics
+    features, not just simulated data.
+    """
+    _get_owned_drone_or_404(db, drone_id, current_user)
+
+    # pymavlink's log reader needs a real file path, not an in-memory
+    # stream, so the upload is written to a temp file first and cleaned
+    # up afterward regardless of success or failure.
+    suffix = os.path.splitext(file.filename or "")[1] or ".tlog"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp_path = tmp.name
+        contents = await file.read()
+        tmp.write(contents)
+
+    try:
+        points = parse_mavlink_log(tmp_path)
+    except MavlinkImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        os.unlink(tmp_path)
+
+    point_dicts = [asdict(p) for p in points]
+    for pd in point_dicts:
+        pd.pop("drone_id", None)  # bulk_create_telemetry sets this itself
+
+    inserted = telemetry_crud.bulk_create_telemetry(db, point_dicts, drone_id=drone_id)
+
+    return {
+        "imported_points": inserted,
+        "start_time": points[0].timestamp.isoformat(),
+        "end_time": points[-1].timestamp.isoformat(),
+        "filename": file.filename,
+    }
 
 
 # ---------- Status / analytics (existing rule-based logic, now owner-scoped) ----------

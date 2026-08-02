@@ -51,6 +51,22 @@ def get_telemetry(
     )
 
 
+def bulk_create_telemetry(db: Session, points: list[dict], drone_id: int) -> int:
+    """
+    Inserts many telemetry rows in one transaction -- used by MAVLink log
+    import, where a single flight log can produce hundreds or thousands of
+    points. Doing this one row at a time through create_telemetry() (each
+    with its own commit + refresh) would be extremely slow for a real log;
+    bulk_insert_mappings does one efficient batch INSERT instead. Returns
+    the number of rows inserted.
+    """
+    for p in points:
+        p["drone_id"] = drone_id
+    db.bulk_insert_mappings(Telemetry, points)
+    db.commit()
+    return len(points)
+
+
 def delete_all_telemetry(db: Session, drone_id: int) -> int:
     """
     Deletes every telemetry reading logged for a drone -- used by the
