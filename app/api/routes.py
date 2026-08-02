@@ -46,6 +46,7 @@ from app.services.environment_simulator import simulate_conditions, air_density
 from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
 from app.services.bemt import analyze_bemt_hover
 from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty
+from app.services.kalman_filter import smooth_altitude_series
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 
 router = APIRouter()
@@ -164,6 +165,35 @@ def read_telemetry(
     return telemetry_crud.get_telemetry(
         db, drone_id, limit=limit, offset=offset, start=start, end=end
     )
+
+
+@router.get("/drones/{drone_id}/telemetry/smoothed")
+def read_smoothed_telemetry(
+    drone_id: int,
+    limit: int = Query(200, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Runs a Kalman filter (see app/services/kalman_filter.py) over this
+    drone's stored altitude readings to produce a smoothed altitude and
+    an estimated vertical velocity (climb rate) at each point -- a purely
+    additive read-side endpoint. Does not touch the raw telemetry table,
+    the WebSocket ingestion path, or the existing GET .../telemetry
+    endpoint; rerunning it is always safe.
+    """
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    readings = telemetry_crud.get_telemetry(db, drone_id, limit=limit)
+    readings_sorted = sorted(readings, key=lambda t: t.timestamp)
+
+    altitude_points = [(t.timestamp, t.altitude) for t in readings_sorted if t.altitude is not None]
+    smoothed = smooth_altitude_series(altitude_points)
+
+    return {
+        "drone_id": drone_id,
+        "num_points": len(smoothed),
+        "points": smoothed,
+    }
 
 
 @router.delete("/drones/{drone_id}/telemetry", status_code=200)
