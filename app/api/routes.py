@@ -27,7 +27,10 @@ from app.models.user import User
 from app.schemas.drone import DroneCreate, DroneOut, DroneUpdate
 from app.schemas.telemetry import TelemetryCreate, TelemetryOut
 from app.schemas.scene_object import SceneObjectCreate, SceneObjectOut
-from app.schemas.path_plan import PathPlanRequest, PathPlanResponse, PathPoint
+from app.schemas.path_plan import (
+    PathPlanRequest, PathPlanResponse, PathPoint,
+    PathPlanRequest3D, PathPlanResponse3D, PathPoint3D,
+)
 from app.schemas.environment import EnvironmentSimulationRequest
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
@@ -35,7 +38,7 @@ from app.crud import scene_object as scene_object_crud
 from app.services.alerts import generate_alerts
 from app.services.drone_analytics import calculate_analytics
 from app.services.telemetry_broadcaster import manager
-from app.services.path_planner import plan_path, path_distance_meters
+from app.services.path_planner import plan_path, path_distance_meters, plan_path_3d, path_distance_meters_3d
 from app.services.predictive_analytics import (
     estimate_battery_remaining,
     detect_anomalies,
@@ -451,6 +454,60 @@ def plan_drone_path(
 
     return PathPlanResponse(
         path=[PathPoint(x=p[0], z=p[1]) for p in path],
+        distance_meters=round(distance, 2),
+        estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
+    )
+
+
+@router.post("/drones/{drone_id}/plan-path-3d", response_model=PathPlanResponse3D)
+def plan_drone_path_3d(
+    drone_id: int,
+    request: PathPlanRequest3D,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Altitude-aware counterpart to /plan-path above (see
+    app/services/path_planner.py's plan_path_3d) -- a separate endpoint,
+    not a change to /plan-path, so the existing 2D planner and its
+    Flutter consumer are unaffected. Obstacles/landing points already
+    store a real y (height) coordinate (see app/models/scene_object.py);
+    this is the first feature to actually use it for planning.
+    """
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
+
+    scene_objects = scene_object_crud.get_scene_objects(db, drone_id)
+    obstacles = [(o.x, o.y, o.z) for o in scene_objects if o.object_type == "obstacle"]
+    landing_points = [o for o in scene_objects if o.object_type == "landing"]
+
+    if not landing_points:
+        raise HTTPException(
+            status_code=404,
+            detail="No landing point set for this drone. Place one in the 3D view first.",
+        )
+
+    goal = (landing_points[0].x, landing_points[0].y, landing_points[0].z)
+    start = (request.start_x, request.start_y, request.start_z)
+
+    try:
+        path = plan_path_3d(start=start, goal=goal, obstacles=obstacles)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if path is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid path found — the landing point may be fully enclosed by obstacles.",
+        )
+
+    distance = path_distance_meters_3d(path)
+
+    estimated_time = None
+    if db_drone.max_speed_mps and db_drone.max_speed_mps > 0:
+        estimated_time = distance / db_drone.max_speed_mps
+
+    return PathPlanResponse3D(
+        path=[PathPoint3D(x=p[0], y=p[1], z=p[2]) for p in path],
         distance_meters=round(distance, 2),
         estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
     )
