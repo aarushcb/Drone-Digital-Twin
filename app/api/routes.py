@@ -44,6 +44,7 @@ from app.services.predictive_analytics import (
 from app.services.digital_twin import compute_digital_twin_stats
 from app.services.environment_simulator import simulate_conditions, air_density
 from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
+from app.services.bemt import analyze_bemt_hover
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 
 router = APIRouter()
@@ -532,7 +533,21 @@ def simulate_environment(
         )
         motor_analysis["static_thrust_coefficient_used"] = CT_STATIC
         result["motor_performance"] = motor_analysis
+
+        # WHY THIS IS ADDITIVE TOO: a second, independently-derived thrust
+        # model (blade-element/momentum theory, see app/services/bemt.py)
+        # cross-checking the static-Ct model above -- purely a new field,
+        # doesn't change or replace motor_performance.
+        result["bemt_analysis"] = analyze_bemt_hover(
+            mass_kg=db_drone.mass_kg,
+            motor_count=db_drone.motor_count,
+            propeller_diameter_in=db_drone.propeller_diameter_in,
+            motor_kv=db_drone.motor_kv,
+            battery_cells=db_drone.battery_cells,
+            air_density=air_density(request.altitude_m, request.temperature_c),
+        )
     else:
         result["motor_performance"] = None
+        result["bemt_analysis"] = None
 
     return result
