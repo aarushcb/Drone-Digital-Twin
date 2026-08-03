@@ -57,6 +57,7 @@ from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty, monte_car
 from app.services.kalman_filter import smooth_altitude_series, detect_sensor_faults, fuse_full_state
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 from app.services.parameter_sweep import analyze_parameter_sweep
+from app.services.efficiency_landscape import compute_efficiency_landscape
 
 router = APIRouter()
 
@@ -684,6 +685,40 @@ def parameter_sweep(
         propeller_diameter_delta_in=request.propeller_diameter_delta_in,
         motor_kv_delta=request.motor_kv_delta,
         battery_cells_delta=request.battery_cells_delta,
+    )
+
+
+@router.get("/drones/{drone_id}/efficiency-landscape")
+def efficiency_landscape(
+    drone_id: int,
+    grid_size: int = Query(12, ge=4, le=25),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    2D (propeller diameter x motor KV) grid of hover efficiency (W/kg),
+    centered on this drone's stored spec -- see
+    app/services/efficiency_landscape.py. Same underlying physics as
+    /parameter-sweep, evaluated over a grid instead of one point, for a
+    heatmap visualization of the design space instead of a single
+    before/after comparison.
+    """
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
+
+    if not has_complete_motor_specs(db_drone):
+        raise HTTPException(
+            status_code=422,
+            detail="This drone is missing motor/propeller/battery specs needed for the efficiency landscape. Fill them in first.",
+        )
+
+    return compute_efficiency_landscape(
+        mass_kg=db_drone.mass_kg,
+        motor_count=db_drone.motor_count,
+        propeller_diameter_in=db_drone.propeller_diameter_in,
+        motor_kv=db_drone.motor_kv,
+        battery_cells=db_drone.battery_cells,
+        battery_capacity_mah=db_drone.battery_capacity_mah,
+        grid_size=grid_size,
     )
 
 
