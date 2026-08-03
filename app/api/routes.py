@@ -60,6 +60,7 @@ from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 from app.services.parameter_sweep import analyze_parameter_sweep
 from app.services.efficiency_landscape import compute_efficiency_landscape
 from app.services.sensor_calibration import analyze_calibration
+from app.services.control_loop import simulate_control_loop
 
 router = APIRouter()
 
@@ -751,6 +752,38 @@ def calibration_check(
         gyro_x=request.gyro_x, gyro_y=request.gyro_y, gyro_z=request.gyro_z,
         mag_x=request.mag_x, mag_y=request.mag_y, mag_z=request.mag_z,
         esc_readings=request.esc_readings,
+    )
+
+
+# ---------- Attitude control loop visualization (educational simulation) ----------
+
+@router.get("/drones/{drone_id}/telemetry/control-loop")
+def control_loop(
+    drone_id: int,
+    scenario: str = Query("stable", pattern="^(stable|oscillating)$"),
+    duration_s: float = Query(4.0, ge=1.0, le=10.0),
+    sample_rate_hz: float = Query(50.0, ge=10.0, le=200.0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Simulates the drone's attitude control loop (roll/pitch/yaw step
+    response) using a standard 2nd-order PD-controlled system model (see
+    app/services/control_loop.py) -- an honestly-labeled SIMULATION, not
+    a read of this drone's actual logged flight: app/models/telemetry.py
+    has never stored a desired-attitude setpoint or motor PWM output, so
+    there is nothing real to read for "desired vs. actual" -- reconstructing
+    one from actual-only data would be circular. `scenario` lets a student
+    directly compare a well-tuned ("stable") vs. poorly-tuned
+    ("oscillating") controller as one real parameter (damping ratio)
+    change, not two unrelated datasets.
+    """
+    _get_owned_drone_or_404(db, drone_id, current_user)
+
+    return simulate_control_loop(
+        scenario=scenario,
+        duration_s=duration_s,
+        sample_rate_hz=sample_rate_hz,
     )
 
 
