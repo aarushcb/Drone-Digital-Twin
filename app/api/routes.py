@@ -33,6 +33,7 @@ from app.schemas.path_plan import (
     PathPlanRequestProbabilistic, PathPlanResponseProbabilistic,
 )
 from app.schemas.environment import EnvironmentSimulationRequest
+from app.schemas.parameter_sweep import ParameterSweepRequest
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
 from app.crud import scene_object as scene_object_crud
@@ -55,6 +56,7 @@ from app.services.bemt import analyze_bemt_hover, analyze_bemt_hover_in_wind
 from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty, monte_carlo_wind_endurance_uncertainty
 from app.services.kalman_filter import smooth_altitude_series, detect_sensor_faults, fuse_full_state
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
+from app.services.parameter_sweep import analyze_parameter_sweep
 
 router = APIRouter()
 
@@ -643,6 +645,45 @@ def plan_drone_path_probabilistic(
         mean_collision_probability=round(sum(risks) / len(risks), 4),
         distance_meters=round(distance, 2),
         estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
+    )
+
+
+# ---------- Interactive parameter sweep (educational "what-if" tool) ----------
+
+@router.post("/drones/{drone_id}/parameter-sweep")
+def parameter_sweep(
+    drone_id: int,
+    request: ParameterSweepRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Lets a student adjust motor KV, propeller diameter, battery cell
+    count, and total mass (as deltas from this drone's stored spec) and
+    see the real physics consequence (see app/services/parameter_sweep.py)
+    -- reuses motor_performance.py's exact dimensional thrust/power
+    formulas for both the current and swept spec, so the comparison is
+    apples-to-apples using one already-verified physics model.
+    """
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
+
+    if not has_complete_motor_specs(db_drone):
+        raise HTTPException(
+            status_code=422,
+            detail="This drone is missing motor/propeller/battery specs needed for a parameter sweep. Fill them in first.",
+        )
+
+    return analyze_parameter_sweep(
+        mass_kg=db_drone.mass_kg,
+        motor_count=db_drone.motor_count,
+        propeller_diameter_in=db_drone.propeller_diameter_in,
+        motor_kv=db_drone.motor_kv,
+        battery_cells=db_drone.battery_cells,
+        battery_capacity_mah=db_drone.battery_capacity_mah,
+        mass_delta_kg=request.mass_delta_kg,
+        propeller_diameter_delta_in=request.propeller_diameter_delta_in,
+        motor_kv_delta=request.motor_kv_delta,
+        battery_cells_delta=request.battery_cells_delta,
     )
 
 
