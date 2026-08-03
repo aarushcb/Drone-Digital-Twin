@@ -47,8 +47,8 @@ from app.services.predictive_analytics import (
 from app.services.digital_twin import compute_digital_twin_stats
 from app.services.environment_simulator import simulate_conditions, air_density
 from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
-from app.services.bemt import analyze_bemt_hover
-from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty
+from app.services.bemt import analyze_bemt_hover, analyze_bemt_hover_in_wind
+from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty, monte_carlo_wind_endurance_uncertainty
 from app.services.kalman_filter import smooth_altitude_series, detect_sensor_faults
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 
@@ -666,9 +666,44 @@ def simulate_environment(
             propeller_diameter_in=db_drone.propeller_diameter_in,
             air_density=air_density(request.altitude_m, request.temperature_c),
         )
+
+        # WHY THIS IS ADDITIVE TOO: extends BEMT to non-zero advance ratio
+        # (see the FORWARD FLIGHT / WIND section of bemt.py) to answer
+        # "what does station-keeping in this wind actually cost" instead
+        # of only ever assuming still air -- only computed when the
+        # request actually specifies wind (wind_speed_mps defaults to 0,
+        # so every existing caller that doesn't set it gets this field as
+        # a deterministic 0%-penalty no-op, never a behavior change).
+        result["wind_analysis"] = analyze_bemt_hover_in_wind(
+            mass_kg=db_drone.mass_kg,
+            motor_count=db_drone.motor_count,
+            propeller_diameter_in=db_drone.propeller_diameter_in,
+            motor_kv=db_drone.motor_kv,
+            battery_cells=db_drone.battery_cells,
+            battery_capacity_mah=db_drone.battery_capacity_mah,
+            air_density=air_density(request.altitude_m, request.temperature_c),
+            wind_speed_mps=request.wind_speed_mps,
+        )
+
+        # WHY THIS IS ADDITIVE TOO: propagates gust variability around the
+        # requested wind speed (see monte_carlo_uq.py's WIND-SPEED (GUST)
+        # UNCERTAINTY section) to give an endurance/power RANGE under
+        # realistic gusty conditions, not just the single point estimate
+        # above computed at exactly the mean wind speed.
+        result["wind_uncertainty"] = monte_carlo_wind_endurance_uncertainty(
+            mass_kg=db_drone.mass_kg,
+            motor_count=db_drone.motor_count,
+            propeller_diameter_in=db_drone.propeller_diameter_in,
+            battery_cells=db_drone.battery_cells,
+            battery_capacity_mah=db_drone.battery_capacity_mah,
+            air_density=air_density(request.altitude_m, request.temperature_c),
+            mean_wind_speed_mps=request.wind_speed_mps,
+        )
     else:
         result["motor_performance"] = None
         result["bemt_analysis"] = None
         result["hover_uncertainty"] = None
+        result["wind_analysis"] = None
+        result["wind_uncertainty"] = None
 
     return result
