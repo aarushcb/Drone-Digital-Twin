@@ -49,7 +49,7 @@ from app.services.environment_simulator import simulate_conditions, air_density
 from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
 from app.services.bemt import analyze_bemt_hover
 from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty
-from app.services.kalman_filter import smooth_altitude_series
+from app.services.kalman_filter import smooth_altitude_series, detect_sensor_faults
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 
 router = APIRouter()
@@ -288,7 +288,25 @@ def get_drone_status(
 
     battery_estimate = estimate_battery_remaining(history + [latest])
     anomalies = detect_anomalies(latest, history)
-    risk_score = calculate_predictive_risk_score(latest, history, battery_estimate)
+
+    # WHY THIS IS ADDITIVE: reuses the Kalman filter already built for
+    # altitude smoothing (app/services/kalman_filter.py) to also run
+    # innovation-based sensor fault detection -- a different, complementary
+    # signal to the z-score anomalies above (see that module's FAULT
+    # DETECTION docstring section). Feeds into risk_score as an extra,
+    # capped factor; every drone with insufficient altitude history simply
+    # gets an empty fault list and a 0-point contribution, same as before.
+    altitude_series = [
+        (t.timestamp, t.altitude) for t in sorted(history + [latest], key=lambda t: t.timestamp)
+        if t.altitude is not None
+    ]
+    smoothed = smooth_altitude_series(altitude_series)
+    sensor_faults = detect_sensor_faults(smoothed)
+    sensor_fault_penalty = sum(20 if f["severity"] == "CRITICAL" else 10 for f in sensor_faults)
+
+    risk_score = calculate_predictive_risk_score(
+        latest, history, battery_estimate, sensor_fault_penalty=sensor_fault_penalty
+    )
 
     # health label kept simple and directly tied to the same risk_score,
     # so the two never contradict each other the way two separately
@@ -312,6 +330,7 @@ def get_drone_status(
         "risk_score": risk_score,
         "alerts": alerts,
         "anomalies": anomalies,
+        "sensor_faults": sensor_faults,
         "battery_estimate": battery_estimate,
         "latest_telemetry": {
             "battery": latest.battery,

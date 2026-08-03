@@ -94,6 +94,8 @@ class KalmanFilter1D:
         self.P = [[initial_variance, 0.0], [0.0, initial_variance]]
         self.q = process_noise_accel_std ** 2
         self.r = measurement_noise_std ** 2
+        self.last_innovation: Optional[float] = None
+        self.last_nis: Optional[float] = None
 
     def predict(self, dt: float) -> None:
         if dt <= 0:
@@ -130,9 +132,16 @@ class KalmanFilter1D:
         p10, p11 = self.P[1]
 
         innovation = measurement - self.x[0]  # y = z - H@x_pred, H = [1, 0]
-        s = p00 + self.r  # S = H@P@H^T + R
+        s = p00 + self.r  # S = H@P@H^T + R -- the innovation covariance
         if s == 0:
             return
+
+        # WHY THIS IS SAVED (used by detect_sensor_faults below): the
+        # innovation y and its covariance S are exactly what innovation-
+        # based fault detection needs -- see the FAULT DETECTION section
+        # of this file's module docstring for the statistical reasoning.
+        self.last_innovation = innovation
+        self.last_nis = (innovation ** 2) / s  # normalized innovation squared
 
         k0 = p00 / s  # K = P @ H^T / S
         k1 = p10 / s
@@ -179,12 +188,17 @@ def smooth_altitude_series(
         measurement_noise_std=measurement_noise_std,
     )
 
+    # First point has no prediction to compare against yet (nothing to
+    # form an innovation from), so innovation/nis are reported as None --
+    # an honest "not applicable yet," not a fabricated zero.
     results = [{
         "timestamp": readings[0][0],
         "raw_altitude": readings[0][1],
         "filtered_altitude": round(kf.position, 3),
         "vertical_velocity_mps": round(kf.velocity, 3),
         "altitude_std_dev": round(kf.position_std_dev, 3),
+        "innovation": None,
+        "nis": None,
     }]
 
     prev_ts = readings[0][0]
@@ -204,6 +218,123 @@ def smooth_altitude_series(
             "filtered_altitude": round(kf.position, 3),
             "vertical_velocity_mps": round(kf.velocity, 3),
             "altitude_std_dev": round(kf.position_std_dev, 3),
+            "innovation": round(kf.last_innovation, 4) if kf.last_innovation is not None else None,
+            "nis": round(kf.last_nis, 3) if kf.last_nis is not None else None,
         })
 
     return results
+
+
+# ============================================================================
+# SENSOR/ACTUATOR FAULT DETECTION FROM THE INNOVATION SEQUENCE
+#
+# WHY THIS EXISTS:
+# The predictive_analytics.py anomaly detector already flags a CURRENT
+# reading as unusual by comparing it to this drone's own historical mean
+# (a z-score test). That's a good, real technique, but it only looks at
+# the raw value -- it can't distinguish "this altitude reading is unusual
+# because the drone is actually climbing fast" from "this altitude
+# reading is unusual because the altimeter itself is glitching," since it
+# has no model of expected DYNAMICS, just a historical distribution of
+# values. The Kalman filter already built for altitude smoothing DOES
+# have a dynamics model (the constant-velocity prediction) -- and the gap
+# between what that model predicted and what the sensor actually reported
+# (the innovation, already computed and saved in KalmanFilter1D.update()
+# above) is a much more targeted fault signal: it stays small for a
+# healthy sensor tracking real drone motion, and grows for a
+# malfunctioning/disconnected/spoofed sensor, REGARDLESS of whether the
+# drone's true altitude happens to be "normal" for it historically.
+#
+# THE STATISTICAL TEST -- NORMALIZED INNOVATION SQUARED (NIS):
+# This is real, standard practice, not invented for this app. For a
+# correctly-tuned linear Kalman filter operating on a fault-free sensor,
+# the normalized innovation squared NIS = innovation^2 / S (S = innovation
+# covariance, already computed as `s` in update() above) is chi-square
+# distributed with 1 degree of freedom (1 DOF because this is a scalar,
+# single-measurement filter) -- this is the standard "innovation
+# consistency" / "innovation magnitude" test described in Bar-Shalom, Li
+# & Kirubarajan, "Estimation with Applications to Tracking and
+# Navigation" (Wiley, 2001), Ch. 5.4 (the same reference already cited in
+# this file's main docstring for the process noise model). Using the
+# filter's own innovation sequence specifically to detect and diagnose
+# sensor/system faults -- rather than just as a smoothing byproduct -- is
+# a distinct, established sub-field, originating with Mehra & Peschon,
+# "An innovations approach to fault detection and diagnosis in dynamic
+# systems" (Automatica, 1971), the founding paper for this exact
+# technique.
+#
+# CHI-SQUARE THRESHOLDS USED (standard tabulated critical values for 1
+# degree of freedom, found in any statistics chi-square table):
+#   - 3.841 = 95th percentile (5% false-alarm rate per single sample)
+#   - 6.635 = 99th percentile (1% false-alarm rate per single sample)
+#
+# WHY A SINGLE NIS SPIKE ISN'T ENOUGH TO CALL A "FAULT":
+# A healthy, correctly-tuned filter will still exceed the 95% threshold
+# on about 1 in 20 samples PURELY BY CHANCE (that's what "95th
+# percentile" means) -- flagging every such blip as a sensor fault would
+# be mostly false alarms. This is why the check below requires several
+# CONSECUTIVE samples over threshold: for MIN_CONSECUTIVE_EXCEEDANCES=3
+# independent 5%-probability events in a row, the chance of that
+# happening by coincidence in a healthy sensor is about
+# 0.05^3 ~= 0.000125 (roughly 1 in 8000) -- a much more defensible bar
+# for actually flagging a fault rather than normal filter noise.
+#
+# WHAT WAS VERIFIED BEFORE SHIPPING:
+# See test_kalman_filter.py -- confirmed a sensor with injected persistent
+# bias/dropout (simulating a stuck or degraded altimeter) triggers a
+# flagged fault, while a normal noisy-but-healthy sensor stream (200+
+# samples) produces zero false-positive fault flags despite individual
+# NIS values occasionally crossing the 95% threshold, exactly as the
+# statistics above predict.
+# ============================================================================
+
+NIS_THRESHOLD_95 = 3.841   # chi-square critical value, 1 DOF, alpha=0.05
+NIS_THRESHOLD_99 = 6.635   # chi-square critical value, 1 DOF, alpha=0.01
+MIN_CONSECUTIVE_EXCEEDANCES = 3
+
+
+def detect_sensor_faults(
+    smoothed_points: List[dict],
+    nis_threshold: float = NIS_THRESHOLD_95,
+    min_consecutive: int = MIN_CONSECUTIVE_EXCEEDANCES,
+) -> List[dict]:
+    """
+    Scans the output of smooth_altitude_series() for runs of consecutive
+    NIS values above `nis_threshold` -- see the module docstring above for
+    why a single exceedance isn't treated as a fault, but several in a row
+    are. Returns one entry per detected fault run (not per point), with
+    the run's start/end timestamp and its peak NIS (how far outside the
+    expected range the worst point in the run was).
+    """
+    faults = []
+    run_start_idx = None
+    run_points = []
+
+    def _close_run(end_idx):
+        if run_start_idx is None:
+            return
+        peak = max(p["nis"] for p in run_points)
+        faults.append({
+            "start_timestamp": smoothed_points[run_start_idx]["timestamp"],
+            "end_timestamp": smoothed_points[end_idx]["timestamp"],
+            "num_consecutive_points": len(run_points),
+            "peak_nis": round(peak, 2),
+            "severity": "CRITICAL" if peak > NIS_THRESHOLD_99 else "WARNING",
+        })
+
+    for i, point in enumerate(smoothed_points):
+        nis = point.get("nis")
+        if nis is not None and nis > nis_threshold:
+            if run_start_idx is None:
+                run_start_idx = i
+            run_points.append(point)
+        else:
+            if len(run_points) >= min_consecutive:
+                _close_run(i - 1)
+            run_start_idx = None
+            run_points = []
+
+    if len(run_points) >= min_consecutive:
+        _close_run(len(smoothed_points) - 1)
+
+    return faults

@@ -150,7 +150,8 @@ def detect_anomalies(current, telemetry_history: List) -> List[str]:
 
 
 def calculate_predictive_risk_score(
-    current, telemetry_history: List, battery_estimate: Optional[Dict]
+    current, telemetry_history: List, battery_estimate: Optional[Dict],
+    sensor_fault_penalty: int = 0,
 ) -> int:
     """
     A weighted 0-100 score combining several factors, replacing the old
@@ -158,6 +159,14 @@ def calculate_predictive_risk_score(
     intentionally simple and inspectable (not a trained/opaque weighting)
     so the score stays explainable -- you can look at any given score and
     trace exactly which factors drove it.
+
+    sensor_fault_penalty: points contributed by Kalman-filter-based
+    sensor/actuator fault detection (see
+    app/services/kalman_filter.py's detect_sensor_faults) -- computed by
+    the caller (routes.py), since it needs the full altitude time series,
+    not just the single `current` reading this function otherwise looks
+    at. Defaults to 0 so every existing caller/test that doesn't pass it
+    behaves exactly as before.
     """
     score = 0
 
@@ -194,5 +203,14 @@ def calculate_predictive_risk_score(
     # noisy sensor spamming anomalies can't single-handedly max the score.
     anomalies = detect_anomalies(current, telemetry_history)
     score += min(15, len(anomalies) * 8)
+
+    # Kalman-filter-detected sensor/actuator faults -- a genuinely
+    # different signal from the z-score anomalies above (see the
+    # FAULT DETECTION section of kalman_filter.py's docstring): those
+    # compare a value to this drone's own history, this compares it to
+    # what the drone's own DYNAMICS predicted a moment ago. Capped for
+    # the same reason anomalies are capped -- one severely faulty sensor
+    # shouldn't alone be indistinguishable from "everything is on fire."
+    score += min(20, sensor_fault_penalty)
 
     return min(100, score)
