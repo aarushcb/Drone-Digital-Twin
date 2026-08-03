@@ -61,6 +61,7 @@ from app.services.parameter_sweep import analyze_parameter_sweep
 from app.services.efficiency_landscape import compute_efficiency_landscape
 from app.services.sensor_calibration import analyze_calibration
 from app.services.control_loop import simulate_control_loop
+from app.services.frame_comparison import compare_frames, VALID_FRAME_TYPES
 
 router = APIRouter()
 
@@ -784,6 +785,52 @@ def control_loop(
         scenario=scenario,
         duration_s=duration_s,
         sample_rate_hz=sample_rate_hz,
+    )
+
+
+# ---------- Frame comparison tool (educational "same motors, different airframe" tool) ----------
+# WHY THIS IS NOT SCOPED UNDER /drones/{id}: unlike every other endpoint
+# in this file, this one isn't about a specific stored drone -- it
+# compares HYPOTHETICAL airframes for a shared motor/prop/battery choice
+# a student is still deciding on, so the spec comes directly in the
+# request instead of being read from a saved Drone row. Still requires
+# login, for the same auth consistency as the rest of this API.
+
+@router.get("/frames/compare")
+def frames_compare(
+    frame_types: str = Query(..., description="Comma-separated: quad,hex,octo,fixed_wing"),
+    mass_kg: float = Query(..., gt=0),
+    propeller_diameter_in: float = Query(..., gt=0),
+    motor_kv: float = Query(..., gt=0),
+    battery_cells: int = Query(..., gt=0),
+    battery_capacity_mah: float = Query(..., gt=0),
+    velocity_mps: Optional[float] = Query(None, gt=0),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Compares the requested frame types (see app/services/frame_comparison.py)
+    for the SAME motor/propeller/battery/mass choice -- thrust-to-weight
+    ratio, max tilt/bank angle, turn rate, hover efficiency, flight time,
+    and max altitude, side by side.
+    """
+    requested = [f.strip() for f in frame_types.split(",") if f.strip()]
+    if not requested:
+        raise HTTPException(status_code=422, detail="frame_types must include at least one frame type.")
+    invalid = [f for f in requested if f not in VALID_FRAME_TYPES]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid frame type(s): {invalid}. Valid options: {sorted(VALID_FRAME_TYPES)}",
+        )
+
+    return compare_frames(
+        frame_types=requested,
+        mass_kg=mass_kg,
+        propeller_diameter_in=propeller_diameter_in,
+        motor_kv=motor_kv,
+        battery_cells=battery_cells,
+        battery_capacity_mah=battery_capacity_mah,
+        velocity_mps=velocity_mps,
     )
 
 
