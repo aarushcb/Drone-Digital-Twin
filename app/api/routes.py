@@ -49,7 +49,7 @@ from app.services.environment_simulator import simulate_conditions, air_density
 from app.services.motor_performance import analyze_motor_performance, has_complete_motor_specs, CT_STATIC
 from app.services.bemt import analyze_bemt_hover, analyze_bemt_hover_in_wind
 from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty, monte_carlo_wind_endurance_uncertainty
-from app.services.kalman_filter import smooth_altitude_series, detect_sensor_faults
+from app.services.kalman_filter import smooth_altitude_series, detect_sensor_faults, fuse_full_state
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 
 router = APIRouter()
@@ -196,6 +196,49 @@ def read_smoothed_telemetry(
         "drone_id": drone_id,
         "num_points": len(smoothed),
         "points": smoothed,
+    }
+
+
+@router.get("/drones/{drone_id}/telemetry/fused")
+def read_fused_state(
+    drone_id: int,
+    limit: int = Query(200, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Runs the 9-state Extended Kalman Filter (see
+    app/services/kalman_filter.py's fuse_full_state) over this drone's
+    stored telemetry to produce one consistent fused estimate of position
+    (local east/north/altitude), velocity, and attitude at each point --
+    instead of displaying position, speed, and attitude as independent
+    unfused raw readings. Purely additive read-side endpoint, same as
+    /telemetry/smoothed above: doesn't touch the raw telemetry table, the
+    WebSocket ingestion path, or any existing telemetry endpoint.
+    """
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    readings = telemetry_crud.get_telemetry(db, drone_id, limit=limit)
+    readings_sorted = sorted(readings, key=lambda t: t.timestamp)
+
+    reading_dicts = [
+        {
+            "timestamp": t.timestamp,
+            "latitude": t.latitude,
+            "longitude": t.longitude,
+            "altitude": t.altitude,
+            "speed": t.speed,
+            "roll": t.roll,
+            "pitch": t.pitch,
+            "yaw": t.yaw,
+        }
+        for t in readings_sorted
+    ]
+    fused = fuse_full_state(reading_dicts)
+
+    return {
+        "drone_id": drone_id,
+        "num_points": len(fused),
+        "points": fused,
     }
 
 
