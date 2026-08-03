@@ -34,6 +34,7 @@ from app.schemas.path_plan import (
 )
 from app.schemas.environment import EnvironmentSimulationRequest
 from app.schemas.parameter_sweep import ParameterSweepRequest
+from app.schemas.sensor_calibration import CalibrationCheckRequest
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
 from app.crud import scene_object as scene_object_crud
@@ -58,6 +59,7 @@ from app.services.kalman_filter import smooth_altitude_series, detect_sensor_fau
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 from app.services.parameter_sweep import analyze_parameter_sweep
 from app.services.efficiency_landscape import compute_efficiency_landscape
+from app.services.sensor_calibration import analyze_calibration
 
 router = APIRouter()
 
@@ -719,6 +721,36 @@ def efficiency_landscape(
         battery_cells=db_drone.battery_cells,
         battery_capacity_mah=db_drone.battery_capacity_mah,
         grid_size=grid_size,
+    )
+
+
+# ---------- Sensor calibration guide (IMU/compass/ESC) ----------
+
+@router.post("/drones/{drone_id}/calibration-check")
+def calibration_check(
+    drone_id: int,
+    request: CalibrationCheckRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Analyzes logged sensor readings from an IMU/compass/ESC calibration
+    step (see app/services/sensor_calibration.py) -- a stateless analysis
+    endpoint scoped to this drone for ownership/auth consistency with the
+    rest of the API, but it doesn't read or write any stored telemetry;
+    the readings to analyze come directly in the request body (captured
+    from whatever calibration routine the student just ran), matching the
+    step-by-step nature of the Flutter calibration guide (accel -> gyro ->
+    compass -> ESC), where each step is checked independently as it's
+    completed.
+    """
+    _get_owned_drone_or_404(db, drone_id, current_user)
+
+    return analyze_calibration(
+        accel_x=request.accel_x, accel_y=request.accel_y, accel_z=request.accel_z,
+        gyro_x=request.gyro_x, gyro_y=request.gyro_y, gyro_z=request.gyro_z,
+        mag_x=request.mag_x, mag_y=request.mag_y, mag_z=request.mag_z,
+        esc_readings=request.esc_readings,
     )
 
 
