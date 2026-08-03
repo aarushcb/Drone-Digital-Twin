@@ -568,11 +568,18 @@ class ExtendedKalmanFilter9D:
 
     @property
     def state_dict(self) -> dict:
+        # position_uncertainty_m: combined position std dev, sqrt(trace of
+        # the 3x3 position sub-block of P) -- the multi-axis generalization
+        # of KalmanFilter1D.position_std_dev, so a caller (e.g. a Flutter
+        # "confidence" display) has a real, filter-derived uncertainty
+        # number instead of nothing to show.
+        position_variance = self.P[0][0] + self.P[1][1] + self.P[2][2]
         return {
             "x_east": round(self.x[0], 3), "y_north": round(self.x[1], 3), "z_alt": round(self.x[2], 3),
             "vx": round(self.x[3], 3), "vy": round(self.x[4], 3), "vz": round(self.x[5], 3),
             "roll": round(self.x[6], 3), "pitch": round(self.x[7], 3), "yaw": round(self.x[8], 3),
             "speed_estimate": round(math.sqrt(self.x[3] ** 2 + self.x[4] ** 2 + self.x[5] ** 2), 3),
+            "position_uncertainty_m": round(math.sqrt(max(position_variance, 0.0)), 3),
         }
 
 
