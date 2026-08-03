@@ -25,6 +25,7 @@ version, noted as a possible future extension.
 
 import heapq
 import math
+import random
 from typing import List, Optional, Tuple
 
 Point = Tuple[float, float]
@@ -298,3 +299,246 @@ def path_distance_meters_3d(path: List[Point3D]) -> float:
     for i in range(1, len(path)):
         total += math.dist(path[i], path[i - 1])
     return total
+
+
+# ============================================================================
+# PROBABILISTIC / RISK-AWARE PATH PLANNING (extension of plan_path_3d above)
+#
+# WHY THIS EXISTS:
+# plan_path_3d treats every obstacle's position as a single exact point --
+# a cell is either "safe" (outside obstacle_radius) or "blocked" (inside
+# it), a hard binary cutoff. In reality, a placed obstacle's position
+# (from a camera/lidar/GPS-based obstacle detector) is only known to
+# within some measurement uncertainty -- treating it as exact overstates
+# confidence right at the boundary and can't express the difference
+# between "well-localized obstacle, tight safety margin needed" and
+# "poorly-localized obstacle, needs a much wider berth." This models each
+# obstacle's true position as a random variable and plans a path that
+# minimizes CUMULATIVE COLLISION PROBABILITY, not just avoids a fixed
+# radius around a fixed point.
+#
+# THE MODEL -- GAUSSIAN OBSTACLE POSITION UNCERTAINTY:
+# Each obstacle's true position is modeled as obstacle ~ N(obstacle_mean,
+# sigma^2 * I) -- independent Gaussian noise in each of x/y/z around the
+# reported (mean) position. This is the standard way position/landmark
+# uncertainty is modeled throughout probabilistic robotics -- see Thrun,
+# Burgard & Fox, "Probabilistic Robotics" (MIT Press, 2005), the standard
+# reference for representing sensor-derived object positions as Gaussian-
+# distributed random variables rather than exact points.
+#
+# COLLISION PROBABILITY VIA MONTE CARLO (reusing this app's existing
+# Monte Carlo pattern from app/services/monte_carlo_uq.py):
+# For a candidate point (a grid cell being evaluated during the search),
+# the probability that it falls within `safety_radius` of an obstacle's
+# TRUE (uncertain) position is estimated the same way
+# monte_carlo_uq.py estimates uncertainty in BEMT/wind outputs: draw many
+# samples of the obstacle's position from its assumed distribution, and
+# take the fraction of samples within safety_radius of the candidate
+# point. This is exactly the risk-estimation approach used in
+# chance-constrained motion planning -- see Blackmore, Ono & Williams,
+# "Chance-Constrained Optimal Path Planning with Obstacles," IEEE
+# Transactions on Robotics, 2011, which evaluates exactly this kind of
+# collision probability (sample-based, since no closed form exists for
+# an arbitrary safety region) to plan paths under bounded collision risk.
+# For multiple obstacles, this combines each obstacle's collision
+# probability assuming independence: P(collision) = 1 - product(1 - P_i)
+# -- the standard formula for the probability of at least one of several
+# independent events occurring.
+#
+# WHY A WEIGHTED COST INSTEAD OF A HARD CHANCE CONSTRAINT:
+# The Blackmore et al. formulation above solves for the shortest path
+# subject to a maximum allowed TOTAL collision probability (a hard
+# constraint, needing iterative search over a risk budget). This module
+# uses a simpler, still-standard alternative: add `risk_weight *
+# collision_probability` as an extra A* edge cost alongside the existing
+# distance cost, so the search naturally trades a longer route for lower
+# cumulative risk (a weighted multi-objective formulation, tunable via
+# risk_weight) -- a documented simplification of the full chance-
+# constrained formulation, appropriate for this app's scope. Cells with
+# essentially-certain collision (probability > HARD_BLOCK_THRESHOLD) are
+# still treated as impassable, exactly like plan_path_3d's hard
+# obstacle_radius cutoff -- otherwise the search has no reason to avoid
+# routing directly through an obstacle's mean position if the distance
+# saved outweighs a merely large (but not ~1.0) risk penalty.
+#
+# WHAT WAS VERIFIED BEFORE SHIPPING:
+# - At obstacle_position_std=0 (no uncertainty), every Monte Carlo sample
+#   lands exactly on the obstacle's mean position, so collision
+#   probability becomes a step function identical to plan_path_3d's hard
+#   obstacle_radius check -- confirmed the probabilistic planner's result
+#   closely matches plan_path_3d's result in this limit (same kind of
+#   reduction check already used for plan_path_3d's flat-altitude-vs-2D
+#   test).
+# - Increasing obstacle_position_std (more positional uncertainty) while
+#   holding everything else fixed makes the planner take a LARGER detour
+#   -- the physically-expected direction (more uncertainty needs a wider
+#   safety margin), verified numerically in test_path_planner_probabilistic.py.
+# ============================================================================
+
+HARD_BLOCK_THRESHOLD = 0.98  # collision probability above this is treated as impassable, not just costly
+
+
+def _sample_obstacle_positions(
+    obstacle_means: List[Point3D], obstacle_position_std: float, num_samples: int, seed: Optional[int] = None,
+) -> List[List[Point3D]]:
+    """Draws `num_samples` Monte Carlo samples of each obstacle's true
+    position from N(mean, obstacle_position_std^2 * I) -- computed ONCE
+    per planning call and reused for every grid cell evaluated during the
+    search (far cheaper than resampling per cell), exactly the same
+    "sample once, evaluate many times" pattern monte_carlo_uq.py uses."""
+    rng = random.Random(seed)
+    return [
+        [
+            (
+                rng.gauss(ox, obstacle_position_std),
+                rng.gauss(oy, obstacle_position_std),
+                rng.gauss(oz, obstacle_position_std),
+            )
+            for _ in range(num_samples)
+        ]
+        for (ox, oy, oz) in obstacle_means
+    ]
+
+
+def collision_probability(
+    point: Point3D, obstacle_samples: List[List[Point3D]], safety_radius: float,
+) -> float:
+    """
+    Monte Carlo-estimated probability that `point` is within
+    safety_radius of AT LEAST ONE obstacle's true (uncertain) position,
+    given each obstacle's pre-drawn position samples (see
+    _sample_obstacle_positions) -- P(collision) = 1 - product(1-P_i)
+    across obstacles, each P_i the fraction of that obstacle's samples
+    within safety_radius of `point`.
+    """
+    prob_no_collision = 1.0
+    for samples in obstacle_samples:
+        if not samples:
+            continue
+        hits = sum(1 for s in samples if math.dist(point, s) <= safety_radius)
+        p_i = hits / len(samples)
+        prob_no_collision *= (1 - p_i)
+    return 1 - prob_no_collision
+
+
+def plan_path_3d_probabilistic(
+    start: Point3D,
+    goal: Point3D,
+    obstacle_means: List[Point3D],
+    obstacle_position_std: float,
+    safety_radius: float = 0.6,
+    cell_size: float = 0.5,
+    margin: float = 3.0,
+    risk_weight: float = 50.0,
+    num_mc_samples: int = 2000,
+    seed: Optional[int] = 42,
+) -> Optional[Tuple[List[Point3D], List[float]]]:
+    """
+    Risk-aware counterpart to plan_path_3d -- same grid/A* skeleton and
+    the same 26-directional neighbor set (_NEIGHBORS_3D, reused as-is),
+    but obstacle avoidance is now a continuous risk cost (see module
+    docstring above) instead of a hard blocked/unblocked cutoff, except
+    for near-certain-collision cells which stay hard-blocked. Returns
+    (path, per_point_collision_probability) or None if no path exists.
+
+    WHY seed DEFAULTS TO A FIXED VALUE (42), UNLIKE monte_carlo_uq.py's
+    functions (which default to seed=None): those functions report
+    aggregate STATISTICS (mean, percentiles) that are, by design, stable
+    across different random seeds once the sample count is large enough
+    -- which seed is used barely matters. Here, the Monte Carlo estimate
+    feeds directly into which literal FLIGHT PATH gets returned -- an
+    unseeded default would mean asking this endpoint for the same drone,
+    same obstacles, same everything, twice in a row could return two
+    different flight paths purely from sampling noise, which is a real,
+    confusing behavior for a planning tool, not a cosmetic one (verified
+    empirically: at the old default of 500 samples with no fixed seed,
+    repeated calls with identical inputs occasionally returned VISIBLY
+    different path lengths -- see the commit message for this feature
+    for the specific numbers). Defaulting to a fixed seed makes the
+    output reproducible for identical inputs, the behavior a path
+    planner should have; num_mc_samples was also raised from 500 to 2000
+    (matching monte_carlo_uq.py's established default) so the underlying
+    risk estimate itself is also tighter, not just consistently repeating
+    the same noisy answer.
+    """
+    obstacle_samples = _sample_obstacle_positions(obstacle_means, obstacle_position_std, num_mc_samples, seed)
+
+    start_risk = collision_probability(start, obstacle_samples, safety_radius)
+    if start_risk > HARD_BLOCK_THRESHOLD:
+        raise ValueError("Start point has near-certain collision probability with an obstacle")
+    goal_risk = collision_probability(goal, obstacle_samples, safety_radius)
+    if goal_risk > HARD_BLOCK_THRESHOLD:
+        raise ValueError("Goal (landing point) has near-certain collision probability with an obstacle")
+
+    all_x = [start[0], goal[0]] + [o[0] for o in obstacle_means]
+    all_y = [start[1], goal[1]] + [o[1] for o in obstacle_means]
+    all_z = [start[2], goal[2]] + [o[2] for o in obstacle_means]
+    origin = (min(all_x) - margin, min(all_y) - margin, min(all_z) - margin)
+    max_point = (max(all_x) + margin, max(all_y) + margin, max(all_z) + margin)
+
+    grid_size = (
+        int((max_point[0] - origin[0]) / cell_size) + 1,
+        int((max_point[1] - origin[1]) / cell_size) + 1,
+        int((max_point[2] - origin[2]) / cell_size) + 1,
+    )
+
+    start_cell = _world_to_grid_3d(start, origin, cell_size)
+    goal_cell = _world_to_grid_3d(goal, origin, cell_size)
+
+    def in_bounds(cell):
+        return (
+            0 <= cell[0] < grid_size[0]
+            and 0 <= cell[1] < grid_size[1]
+            and 0 <= cell[2] < grid_size[2]
+        )
+
+    # Cached per-cell so repeated A* neighbor expansions (a cell can be
+    # reached via multiple paths before it's finalized) don't re-run the
+    # Monte Carlo evaluation for the same cell twice.
+    risk_cache: dict = {}
+
+    def risk_at(cell) -> float:
+        if cell not in risk_cache:
+            world_point = _grid_to_world_3d(cell, origin, cell_size)
+            risk_cache[cell] = collision_probability(world_point, obstacle_samples, safety_radius)
+        return risk_cache[cell]
+
+    def heuristic(a, b):
+        return math.dist(a, b)
+
+    open_heap = [(0.0, start_cell)]
+    came_from = {}
+    g_score = {start_cell: 0.0}
+    visited = set()
+
+    while open_heap:
+        _, current = heapq.heappop(open_heap)
+        if current in visited:
+            continue
+        visited.add(current)
+
+        if current == goal_cell:
+            path_cells = [current]
+            while current in came_from:
+                current = came_from[current]
+                path_cells.append(current)
+            path_cells.reverse()
+            path = [_grid_to_world_3d(c, origin, cell_size) for c in path_cells]
+            risks = [risk_at(c) for c in path_cells]
+            return path, risks
+
+        for dx, dy, dz, cost in _NEIGHBORS_3D:
+            neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+            if not in_bounds(neighbor) or neighbor in visited:
+                continue
+            neighbor_risk = risk_at(neighbor)
+            if neighbor_risk > HARD_BLOCK_THRESHOLD:
+                continue  # near-certain collision -- treated as impassable, same as plan_path_3d's hard radius
+            tentative_g = g_score[current] + cost + risk_weight * neighbor_risk
+            if tentative_g < g_score.get(neighbor, math.inf):
+                came_from[neighbor] = current
+                g_score[neighbor] = tentative_g
+                f_score = tentative_g + heuristic(neighbor, goal_cell)
+                heapq.heappush(open_heap, (f_score, neighbor))
+
+    return None  # goal genuinely unreachable given the obstacles/risk field

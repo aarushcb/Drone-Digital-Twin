@@ -30,6 +30,7 @@ from app.schemas.scene_object import SceneObjectCreate, SceneObjectOut
 from app.schemas.path_plan import (
     PathPlanRequest, PathPlanResponse, PathPoint,
     PathPlanRequest3D, PathPlanResponse3D, PathPoint3D,
+    PathPlanRequestProbabilistic, PathPlanResponseProbabilistic,
 )
 from app.schemas.environment import EnvironmentSimulationRequest
 from app.crud import drone as drone_crud
@@ -38,7 +39,10 @@ from app.crud import scene_object as scene_object_crud
 from app.services.alerts import generate_alerts
 from app.services.drone_analytics import calculate_analytics
 from app.services.telemetry_broadcaster import manager
-from app.services.path_planner import plan_path, path_distance_meters, plan_path_3d, path_distance_meters_3d
+from app.services.path_planner import (
+    plan_path, path_distance_meters, plan_path_3d, path_distance_meters_3d,
+    plan_path_3d_probabilistic,
+)
 from app.services.predictive_analytics import (
     estimate_battery_remaining,
     detect_anomalies,
@@ -570,6 +574,73 @@ def plan_drone_path_3d(
 
     return PathPlanResponse3D(
         path=[PathPoint3D(x=p[0], y=p[1], z=p[2]) for p in path],
+        distance_meters=round(distance, 2),
+        estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
+    )
+
+
+@router.post("/drones/{drone_id}/plan-path-probabilistic", response_model=PathPlanResponseProbabilistic)
+def plan_drone_path_probabilistic(
+    drone_id: int,
+    request: PathPlanRequestProbabilistic,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Risk-aware counterpart to /plan-path-3d above (see
+    app/services/path_planner.py's plan_path_3d_probabilistic) -- a
+    separate endpoint, not a change to /plan-path-3d, so that endpoint
+    and its behavior are completely unaffected. Treats each obstacle's
+    placed position as the MEAN of an uncertain (Gaussian) true position
+    rather than an exact point, and minimizes cumulative collision
+    probability (Monte Carlo-estimated, reusing the same sampling pattern
+    as app/services/monte_carlo_uq.py) instead of just avoiding a fixed
+    radius.
+    """
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
+
+    scene_objects = scene_object_crud.get_scene_objects(db, drone_id)
+    obstacles = [(o.x, o.y, o.z) for o in scene_objects if o.object_type == "obstacle"]
+    landing_points = [o for o in scene_objects if o.object_type == "landing"]
+
+    if not landing_points:
+        raise HTTPException(
+            status_code=404,
+            detail="No landing point set for this drone. Place one in the 3D view first.",
+        )
+
+    goal = (landing_points[0].x, landing_points[0].y, landing_points[0].z)
+    start = (request.start_x, request.start_y, request.start_z)
+
+    try:
+        result = plan_path_3d_probabilistic(
+            start=start,
+            goal=goal,
+            obstacle_means=obstacles,
+            obstacle_position_std=request.obstacle_position_std,
+            risk_weight=request.risk_weight,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if result is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid path found — every route may pass through near-certain collision risk.",
+        )
+
+    path, risks = result
+    distance = path_distance_meters_3d(path)
+
+    estimated_time = None
+    if db_drone.max_speed_mps and db_drone.max_speed_mps > 0:
+        estimated_time = distance / db_drone.max_speed_mps
+
+    return PathPlanResponseProbabilistic(
+        path=[PathPoint3D(x=p[0], y=p[1], z=p[2]) for p in path],
+        collision_probability_per_point=[round(r, 4) for r in risks],
+        max_collision_probability=round(max(risks), 4),
+        mean_collision_probability=round(sum(risks) / len(risks), 4),
         distance_meters=round(distance, 2),
         estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
     )
