@@ -50,6 +50,16 @@ class Drone(Base):
     motor_kv = Column(Integer, nullable=True)             # RPM per volt, standard motor rating
     battery_cells = Column(Integer, nullable=True)        # LiPo "S" rating, e.g. 4 = 4S = 14.8V nominal
 
+    # Added for real fixed-wing cruise endurance physics (see
+    # app/services/frame_comparison.py's Breguet-style electric-aircraft
+    # endurance calculation) -- rotorcraft (quad/hex/octo) never read
+    # these; only meaningful for a fixed_wing frame_type, and even then
+    # both are nullable/optional (representative defaults are used if
+    # either is missing, same "optional, defaults if absent" pattern as
+    # every other spec field here).
+    wing_area_m2 = Column(Float, nullable=True)            # total wing planform area, square meters
+    lift_to_drag_ratio = Column(Float, nullable=True)       # representative cruise L/D, dimensionless
+
     owner = relationship("User", back_populates="drones")
     telemetry = relationship("Telemetry", back_populates="drone", cascade="all, delete-orphan")
     scene_objects = relationship("SceneObject", back_populates="drone", cascade="all, delete-orphan")

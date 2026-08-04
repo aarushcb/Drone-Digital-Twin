@@ -805,13 +805,17 @@ def frames_compare(
     battery_cells: int = Query(..., gt=0),
     battery_capacity_mah: float = Query(..., gt=0),
     velocity_mps: Optional[float] = Query(None, gt=0),
+    wing_area_m2: Optional[float] = Query(None, gt=0, description="Only used for fixed_wing; ignored by rotorcraft"),
+    lift_to_drag_ratio: Optional[float] = Query(None, gt=0, description="Only used for fixed_wing; ignored by rotorcraft"),
     current_user: User = Depends(get_current_user),
 ):
     """
     Compares the requested frame types (see app/services/frame_comparison.py)
     for the SAME motor/propeller/battery/mass choice -- thrust-to-weight
     ratio, max tilt/bank angle, turn rate, hover efficiency, flight time,
-    and max altitude, side by side.
+    and max altitude, side by side. wing_area_m2/lift_to_drag_ratio are
+    optional and only affect the fixed_wing entry's real cruise-endurance
+    physics (falls back to documented representative defaults if omitted).
     """
     requested = [f.strip() for f in frame_types.split(",") if f.strip()]
     if not requested:
@@ -831,6 +835,8 @@ def frames_compare(
         battery_cells=battery_cells,
         battery_capacity_mah=battery_capacity_mah,
         velocity_mps=velocity_mps,
+        wing_area_m2=wing_area_m2,
+        lift_to_drag_ratio=lift_to_drag_ratio,
     )
 
 

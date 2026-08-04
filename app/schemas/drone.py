@@ -19,6 +19,8 @@ SPEC_LIMITS = {
     "propeller_diameter_in": (1, 40),        # 2" micro-whoop props to 40" heavy-lift industrial props
     "motor_kv": (30, 3000),                  # 30KV large cinema/heavy-lift motors to 3000KV micro racing motors
     "battery_cells": (1, 16),                # 1S micro-whoop to 16S large industrial LiPo packs
+    "wing_area_m2": (0.01, 20),              # small hand-launch fixed-wing to large fixed-wing UAS
+    "lift_to_drag_ratio": (3, 60),           # draggy micro fixed-wing to high-performance sailplane-like L/D
 }
 
 
@@ -57,6 +59,12 @@ class DroneCreate(BaseModel):
     motor_kv: Optional[int] = None
     battery_cells: Optional[int] = None
 
+    # Added for real fixed-wing cruise endurance physics (see
+    # app/services/frame_comparison.py) -- only meaningful for
+    # frame_type="fixed_wing"; ignored by rotorcraft calculations.
+    wing_area_m2: Optional[float] = None
+    lift_to_drag_ratio: Optional[float] = None
+
     @field_validator(*_RANGE_CHECKED_FIELDS)
     @classmethod
     def validate_spec_range(cls, v, info):
@@ -77,6 +85,8 @@ class DroneUpdate(BaseModel):
     propeller_diameter_in: Optional[float] = None
     motor_kv: Optional[int] = None
     battery_cells: Optional[int] = None
+    wing_area_m2: Optional[float] = None
+    lift_to_drag_ratio: Optional[float] = None
 
     @field_validator(*_RANGE_CHECKED_FIELDS)
     @classmethod
@@ -99,5 +109,7 @@ class DroneOut(BaseModel):
     propeller_diameter_in: Optional[float] = None
     motor_kv: Optional[int] = None
     battery_cells: Optional[int] = None
+    wing_area_m2: Optional[float] = None
+    lift_to_drag_ratio: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
