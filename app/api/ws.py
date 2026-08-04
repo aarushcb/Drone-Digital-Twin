@@ -44,7 +44,7 @@ async def telemetry_websocket(websocket: WebSocket, drone_id: int, token: str = 
     finally:
         db.close()
 
-    await manager.connect(drone_id, websocket)
+    await manager.connect(drone_id, user.id, websocket)
     try:
         while True:
             # We don't expect the client to send anything -- this just
