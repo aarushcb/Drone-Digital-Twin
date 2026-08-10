@@ -6,8 +6,11 @@ standalone test_*.py scripts in this repo.
 import sys, os, math
 sys.path.insert(0, os.path.dirname(__file__))
 
+from datetime import datetime, timedelta, timezone
+
 from app.services.control_loop import (
     simulate_step_response, closed_form_metrics, simulate_control_loop,
+    build_real_control_loop_response, MIN_REAL_CONTROL_LOOP_SAMPLES,
     STABLE_DAMPING_RATIO, OSCILLATING_DAMPING_RATIO, DEFAULT_NATURAL_FREQUENCY_RAD_S,
 )
 
@@ -132,6 +135,82 @@ def test_full_control_loop_simulation_returns_all_three_axes():
     print(f"PASS: full simulation returns all 3 axes with matching-length time series -> {list(result['axes'].keys())}")
 
 
+def _make_sample(t, roll, pitch, yaw, desired_roll, desired_pitch, desired_yaw, pwm=None):
+    s = {
+        "timestamp": t, "roll": roll, "pitch": pitch, "yaw": yaw,
+        "desired_roll": desired_roll, "desired_pitch": desired_pitch, "desired_yaw": desired_yaw,
+    }
+    for i in range(1, 5):
+        s[f"motor_pwm_{i}"] = pwm[i - 1] if pwm else None
+    return s
+
+
+def test_too_few_real_samples_returns_none_so_caller_falls_back_to_simulation():
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    samples = [_make_sample(t0 + timedelta(seconds=i), 1, 1, 1, 2, 2, 2) for i in range(MIN_REAL_CONTROL_LOOP_SAMPLES - 1)]
+    result = build_real_control_loop_response(samples)
+    assert result is None
+    print(f"PASS: {len(samples)} real samples (below the {MIN_REAL_CONTROL_LOOP_SAMPLES}-sample minimum) returns None")
+
+
+def test_real_response_reports_data_source_and_honest_tracking_error():
+    # A perfect controller (actual == desired always) should show zero
+    # tracking error -- the simplest possible correctness check for the
+    # RMS/max error formulas.
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    n = 10
+    samples = [
+        _make_sample(t0 + timedelta(seconds=0.1 * i), 5.0, -3.0, 90.0, 5.0, -3.0, 90.0)
+        for i in range(n)
+    ]
+    result = build_real_control_loop_response(samples)
+    assert result["data_source"] == "real"
+    assert result["sample_count"] == n
+    for axis in ("roll", "pitch", "yaw"):
+        assert result["axes"][axis]["rms_error_deg"] == 0.0
+        assert result["axes"][axis]["max_error_deg"] == 0.0
+    assert result["motor_pwm"] is None
+    print("PASS: perfect-tracking real samples give zero RMS/max error and data_source='real'")
+
+
+def test_real_response_tracking_error_matches_hand_computed_value():
+    # A constant 2-degree roll offset for every sample -> RMS and max
+    # error should both be exactly 2.0 (not some formula-dependent
+    # approximation) -- the simplest non-trivial hand-computed check.
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    samples = [
+        _make_sample(t0 + timedelta(seconds=0.1 * i), 3.0, 0.0, 0.0, 5.0, 0.0, 0.0)
+        for i in range(MIN_REAL_CONTROL_LOOP_SAMPLES)
+    ]
+    result = build_real_control_loop_response(samples)
+    assert result["axes"]["roll"]["rms_error_deg"] == 2.0
+    assert result["axes"]["roll"]["max_error_deg"] == 2.0
+    print("PASS: constant 2deg roll offset gives RMS error=2.0 and max error=2.0, hand-computed")
+
+
+def test_real_response_includes_motor_pwm_when_present():
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    samples = [
+        _make_sample(t0 + timedelta(seconds=0.1 * i), 0, 0, 0, 0, 0, 0, pwm=[1500, 1500, 1500, 1500])
+        for i in range(MIN_REAL_CONTROL_LOOP_SAMPLES)
+    ]
+    result = build_real_control_loop_response(samples)
+    assert result["motor_pwm"] is not None
+    assert result["motor_pwm"]["motor_pwm_1"] == [1500] * MIN_REAL_CONTROL_LOOP_SAMPLES
+    print("PASS: motor_pwm sub-object populated when telemetry has PWM data")
+
+
+def test_real_response_timestamps_are_relative_seconds_from_first_sample():
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    samples = [
+        _make_sample(t0 + timedelta(seconds=2 * i), 0, 0, 0, 0, 0, 0)
+        for i in range(MIN_REAL_CONTROL_LOOP_SAMPLES)
+    ]
+    result = build_real_control_loop_response(samples)
+    assert result["axes"]["roll"]["timestamps_s"] == [0.0, 2.0, 4.0, 6.0, 8.0]
+    print("PASS: timestamps_s are relative seconds from the first real sample")
+
+
 if __name__ == "__main__":
     test_numerical_simulation_matches_closed_form_solution()
     test_peak_time_metric_matches_the_simulations_own_actual_peak()
@@ -139,4 +218,9 @@ if __name__ == "__main__":
     test_oscillating_scenario_actually_overshoots_more_than_stable()
     test_control_input_is_zero_at_steady_state()
     test_full_control_loop_simulation_returns_all_three_axes()
+    test_too_few_real_samples_returns_none_so_caller_falls_back_to_simulation()
+    test_real_response_reports_data_source_and_honest_tracking_error()
+    test_real_response_tracking_error_matches_hand_computed_value()
+    test_real_response_includes_motor_pwm_when_present()
+    test_real_response_timestamps_are_relative_seconds_from_first_sample()
     print("\nAll control loop tests passed.")

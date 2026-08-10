@@ -51,6 +51,34 @@ def get_telemetry(
     )
 
 
+def get_control_loop_samples(db: Session, drone_id: int, limit: int = 300) -> list[Telemetry]:
+    """
+    Returns the most recent telemetry rows for a drone that actually carry
+    a REAL attitude setpoint (desired_roll/pitch/yaw) and actual attitude
+    -- i.e. rows that came from a real/MAVLink-imported flight with
+    ATTITUDE_TARGET data (see app/services/mavlink_import.py), not the
+    ordinary actual-only telemetry every reading has always had. Used by
+    the control-loop visualization (app/services/control_loop.py) to show
+    real desired-vs-actual data when it exists, in chronological order.
+    """
+    rows = (
+        db.query(Telemetry)
+        .filter(
+            Telemetry.drone_id == drone_id,
+            Telemetry.desired_roll.isnot(None),
+            Telemetry.desired_pitch.isnot(None),
+            Telemetry.desired_yaw.isnot(None),
+            Telemetry.roll.isnot(None),
+            Telemetry.pitch.isnot(None),
+            Telemetry.yaw.isnot(None),
+        )
+        .order_by(Telemetry.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return list(reversed(rows))
+
+
 def bulk_create_telemetry(db: Session, points: list[dict], drone_id: int) -> int:
     """
     Inserts many telemetry rows in one transaction -- used by MAVLink log

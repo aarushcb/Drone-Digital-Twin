@@ -78,7 +78,7 @@ WHAT WAS VERIFIED BEFORE SHIPPING:
 """
 
 import math
-from typing import List
+from typing import List, Optional
 
 DEFAULT_NATURAL_FREQUENCY_RAD_S = 8.0
 STABLE_DAMPING_RATIO = 0.7
@@ -226,4 +226,77 @@ def simulate_control_loop(
         "damping_ratio": damping_ratio,
         "natural_frequency_rad_s": natural_frequency_rad_s,
         "axes": axes,
+    }
+
+
+# ---------- REAL desired-vs-actual data, when a drone's telemetry has it ----------
+# app/models/telemetry.py added optional desired_roll/pitch/yaw and
+# motor_pwm_1-4 columns specifically so a real or MAVLink-imported flight
+# (see app/services/mavlink_import.py's ATTITUDE_TARGET/SERVO_OUTPUT_RAW
+# parsing) CAN populate real setpoint/output data. When it has, this
+# builds the control-loop visualization from that real data instead of
+# the simulation above. When it hasn't (the common case -- ordinary
+# telemetry has never recorded a setpoint), the caller falls back to
+# simulate_control_loop().
+
+MIN_REAL_CONTROL_LOOP_SAMPLES = 5
+
+
+def build_real_control_loop_response(samples: List[dict]) -> Optional[dict]:
+    """
+    samples: chronologically ordered list of dicts, each with keys
+    'timestamp' (datetime), 'roll'/'pitch'/'yaw', and
+    'desired_roll'/'desired_pitch'/'desired_yaw' -- all guaranteed
+    non-None by the caller's query (see app/crud/telemetry.py's
+    get_control_loop_samples), plus optional 'motor_pwm_1'..'motor_pwm_4'.
+
+    Returns None if there aren't enough real samples to plot anything
+    meaningful (MIN_REAL_CONTROL_LOOP_SAMPLES), so the caller can fall
+    back to the simulation.
+
+    Unlike the simulation, this does NOT report step-response metrics
+    (peak time, overshoot %, settling time) -- those closed-form formulas
+    (see module docstring above) assume an idealized clean step input,
+    which arbitrary real flight data is not. Instead this reports the
+    metric that's always honestly valid for a real desired-vs-actual
+    trace: tracking error (desired - actual), as RMS and max magnitude
+    per axis -- the standard way control engineers quantify real-world
+    tracking performance without assuming a clean step test.
+    """
+    if len(samples) < MIN_REAL_CONTROL_LOOP_SAMPLES:
+        return None
+
+    t0 = samples[0]["timestamp"]
+    timestamps_s = [round((s["timestamp"] - t0).total_seconds(), 4) for s in samples]
+
+    axes = {}
+    for axis in ("roll", "pitch", "yaw"):
+        desired = [s[f"desired_{axis}"] for s in samples]
+        actual = [s[axis] for s in samples]
+        errors = [d - a for d, a in zip(desired, actual)]
+        rms_error = math.sqrt(sum(e ** 2 for e in errors) / len(errors))
+        max_error = max(abs(e) for e in errors)
+        axes[axis] = {
+            "timestamps_s": timestamps_s,
+            "desired_deg": [round(v, 4) for v in desired],
+            "actual_deg": [round(v, 4) for v in actual],
+            "rms_error_deg": round(rms_error, 3),
+            "max_error_deg": round(max_error, 3),
+        }
+
+    motor_pwm_keys = ["motor_pwm_1", "motor_pwm_2", "motor_pwm_3", "motor_pwm_4"]
+    has_pwm_data = any(s.get(k) is not None for s in samples for k in motor_pwm_keys)
+    motor_pwm = None
+    if has_pwm_data:
+        motor_pwm = {"timestamps_s": timestamps_s}
+        for key in motor_pwm_keys:
+            motor_pwm[key] = [s.get(key) for s in samples]
+
+    return {
+        "data_source": "real",
+        "sample_count": len(samples),
+        "start_time": samples[0]["timestamp"].isoformat(),
+        "end_time": samples[-1]["timestamp"].isoformat(),
+        "axes": axes,
+        "motor_pwm": motor_pwm,
     }

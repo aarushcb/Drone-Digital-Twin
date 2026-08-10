@@ -17,6 +17,10 @@ It's a stream of small independent messages arriving at different rates:
   - SYS_STATUS or BATTERY_STATUS (~1-2Hz): battery percentage
   - VFR_HUD (~5Hz): groundspeed
   - HEARTBEAT (~1Hz): armed/disarmed state
+  - ATTITUDE_TARGET (~a few Hz, only sent by autopilots that report it):
+    the controller's desired roll/pitch/yaw, as a quaternion
+  - SERVO_OUTPUT_RAW (~a few Hz, only sent by autopilots that report it):
+    raw ESC/servo PWM outputs
 None of these arrive at the same instant. So this parser does a forward-fill
 merge: it walks every message in chronological order, keeps track of the
 LATEST known value for each field, and emits one combined telemetry row
@@ -46,10 +50,45 @@ class ImportedTelemetryPoint:
     yaw: Optional[float]
     flight_state: str
     timestamp: datetime
+    # Real attitude setpoint and motor output, when the log has them (see
+    # app/models/telemetry.py) -- from ATTITUDE_TARGET (a quaternion, here
+    # converted to Euler degrees) and SERVO_OUTPUT_RAW (PWM microseconds).
+    # Both are forward-filled the same way as roll/battery/etc. above, and
+    # both stay None for logs/aircraft that never send these messages.
+    desired_roll: Optional[float] = None
+    desired_pitch: Optional[float] = None
+    desired_yaw: Optional[float] = None
+    motor_pwm_1: Optional[float] = None
+    motor_pwm_2: Optional[float] = None
+    motor_pwm_3: Optional[float] = None
+    motor_pwm_4: Optional[float] = None
 
 
 class MavlinkImportError(Exception):
     pass
+
+
+def _quaternion_to_euler_deg(q) -> tuple:
+    """
+    Standard aerospace (ZYX Tait-Bryan) quaternion-to-Euler conversion --
+    see e.g. Wikipedia "Conversion between quaternions and Euler angles",
+    the same formula used by ArduPilot/PX4 ground stations to display
+    ATTITUDE_TARGET's quaternion as roll/pitch/yaw. q = [w, x, y, z].
+    """
+    w, x, y, z = q[0], q[1], q[2], q[3]
+
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2 * (w * y - z * x)
+    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
+
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    return math.degrees(roll), math.degrees(pitch), math.degrees(yaw)
 
 
 def parse_mavlink_log(file_path: str) -> list[ImportedTelemetryPoint]:
@@ -70,6 +109,13 @@ def parse_mavlink_log(file_path: str) -> list[ImportedTelemetryPoint]:
     latest_pitch: Optional[float] = None
     latest_yaw: Optional[float] = None
     latest_speed: Optional[float] = None
+    latest_desired_roll: Optional[float] = None
+    latest_desired_pitch: Optional[float] = None
+    latest_desired_yaw: Optional[float] = None
+    latest_pwm1: Optional[float] = None
+    latest_pwm2: Optional[float] = None
+    latest_pwm3: Optional[float] = None
+    latest_pwm4: Optional[float] = None
     armed = False
 
     points: list[ImportedTelemetryPoint] = []
@@ -112,6 +158,19 @@ def parse_mavlink_log(file_path: str) -> list[ImportedTelemetryPoint]:
         elif msg_type == "VFR_HUD":
             latest_speed = float(msg.groundspeed)
 
+        elif msg_type == "ATTITUDE_TARGET":
+            latest_desired_roll, latest_desired_pitch, target_yaw = _quaternion_to_euler_deg(msg.q)
+            latest_desired_yaw = target_yaw % 360
+
+        elif msg_type == "SERVO_OUTPUT_RAW":
+            # A raw value of 0 means that servo output channel isn't in
+            # use on this airframe -- kept as None rather than a
+            # misleading 0us PWM reading.
+            latest_pwm1 = float(msg.servo1_raw) if getattr(msg, "servo1_raw", 0) else None
+            latest_pwm2 = float(msg.servo2_raw) if getattr(msg, "servo2_raw", 0) else None
+            latest_pwm3 = float(msg.servo3_raw) if getattr(msg, "servo3_raw", 0) else None
+            latest_pwm4 = float(msg.servo4_raw) if getattr(msg, "servo4_raw", 0) else None
+
         elif msg_type == "GLOBAL_POSITION_INT":
             # This is the sync point: emit one combined row per position update.
             lat = msg.lat / 1e7
@@ -129,6 +188,13 @@ def parse_mavlink_log(file_path: str) -> list[ImportedTelemetryPoint]:
                 yaw=latest_yaw,
                 flight_state="flying" if armed else "idle",
                 timestamp=t,
+                desired_roll=latest_desired_roll,
+                desired_pitch=latest_desired_pitch,
+                desired_yaw=latest_desired_yaw,
+                motor_pwm_1=latest_pwm1,
+                motor_pwm_2=latest_pwm2,
+                motor_pwm_3=latest_pwm3,
+                motor_pwm_4=latest_pwm4,
             ))
 
     if not points:

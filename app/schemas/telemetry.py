@@ -14,6 +14,13 @@ class TelemetryCreate(BaseModel):
     pitch: Optional[float] = None
     yaw: Optional[float] = None
     flight_state: Optional[str] = "idle"
+    desired_roll: Optional[float] = None
+    desired_pitch: Optional[float] = None
+    desired_yaw: Optional[float] = None
+    motor_pwm_1: Optional[float] = None
+    motor_pwm_2: Optional[float] = None
+    motor_pwm_3: Optional[float] = None
+    motor_pwm_4: Optional[float] = None
 
 
 class TelemetryOut(TelemetryCreate):

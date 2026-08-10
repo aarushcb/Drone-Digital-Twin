@@ -60,7 +60,7 @@ from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
 from app.services.parameter_sweep import analyze_parameter_sweep
 from app.services.efficiency_landscape import compute_efficiency_landscape
 from app.services.sensor_calibration import analyze_calibration
-from app.services.control_loop import simulate_control_loop
+from app.services.control_loop import simulate_control_loop, build_real_control_loop_response
 from app.services.frame_comparison import compare_frames, VALID_FRAME_TYPES
 
 router = APIRouter()
@@ -768,24 +768,50 @@ def control_loop(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Simulates the drone's attitude control loop (roll/pitch/yaw step
-    response) using a standard 2nd-order PD-controlled system model (see
-    app/services/control_loop.py) -- an honestly-labeled SIMULATION, not
-    a read of this drone's actual logged flight: app/models/telemetry.py
-    has never stored a desired-attitude setpoint or motor PWM output, so
-    there is nothing real to read for "desired vs. actual" -- reconstructing
-    one from actual-only data would be circular. `scenario` lets a student
-    directly compare a well-tuned ("stable") vs. poorly-tuned
-    ("oscillating") controller as one real parameter (damping ratio)
-    change, not two unrelated datasets.
+    Shows the drone's attitude control loop (roll/pitch/yaw desired vs.
+    actual). If this drone's telemetry actually has real setpoint data
+    (desired_roll/pitch/yaw, populated by a MAVLink log import -- see
+    app/services/mavlink_import.py's ATTITUDE_TARGET parsing), that real
+    data is returned, clearly labeled "data_source": "real". Otherwise --
+    the common case, since ordinary telemetry has never recorded a
+    setpoint -- this falls back to an honestly-labeled SIMULATION using a
+    standard 2nd-order PD-controlled system model (see
+    app/services/control_loop.py), "data_source": "simulated".
+    `scenario`/`duration_s`/`sample_rate_hz` only affect the simulated
+    fallback. `scenario` lets a student directly compare a well-tuned
+    ("stable") vs. poorly-tuned ("oscillating") controller as one real
+    parameter (damping ratio) change, not two unrelated datasets.
     """
     _get_owned_drone_or_404(db, drone_id, current_user)
 
-    return simulate_control_loop(
+    real_samples = telemetry_crud.get_control_loop_samples(db, drone_id)
+    sample_dicts = [
+        {
+            "timestamp": s.timestamp,
+            "roll": s.roll,
+            "pitch": s.pitch,
+            "yaw": s.yaw,
+            "desired_roll": s.desired_roll,
+            "desired_pitch": s.desired_pitch,
+            "desired_yaw": s.desired_yaw,
+            "motor_pwm_1": s.motor_pwm_1,
+            "motor_pwm_2": s.motor_pwm_2,
+            "motor_pwm_3": s.motor_pwm_3,
+            "motor_pwm_4": s.motor_pwm_4,
+        }
+        for s in real_samples
+    ]
+    real_response = build_real_control_loop_response(sample_dicts)
+    if real_response is not None:
+        return real_response
+
+    simulation = simulate_control_loop(
         scenario=scenario,
         duration_s=duration_s,
         sample_rate_hz=sample_rate_hz,
     )
+    simulation["data_source"] = "simulated"
+    return simulation
 
 
 # ---------- Frame comparison tool (educational "same motors, different airframe" tool) ----------

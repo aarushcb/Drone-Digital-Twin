@@ -45,6 +45,22 @@ class Telemetry(Base):
 
     flight_state = Column(String, default="idle")  # idle, armed, flying, landing, error
 
+    # Added so the control-loop visualization (app/services/control_loop.py)
+    # can show REAL desired-vs-actual attitude and motor output instead of
+    # only ever simulating it -- ordinary telemetry (from the WebSocket
+    # simulator, manual entry, etc.) will never populate these, but a
+    # MAVLink log import (see app/services/mavlink_import.py) can, from
+    # that log's ATTITUDE_TARGET and SERVO_OUTPUT_RAW messages. All
+    # nullable/optional -- every existing telemetry row and every existing
+    # write path is unaffected.
+    desired_roll = Column(Float, nullable=True)   # degrees, attitude setpoint
+    desired_pitch = Column(Float, nullable=True)  # degrees, attitude setpoint
+    desired_yaw = Column(Float, nullable=True)    # degrees, attitude setpoint
+    motor_pwm_1 = Column(Float, nullable=True)    # microseconds, ESC/servo output
+    motor_pwm_2 = Column(Float, nullable=True)    # microseconds, ESC/servo output
+    motor_pwm_3 = Column(Float, nullable=True)    # microseconds, ESC/servo output
+    motor_pwm_4 = Column(Float, nullable=True)    # microseconds, ESC/servo output
+
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
     drone = relationship("Drone", back_populates="telemetry")
