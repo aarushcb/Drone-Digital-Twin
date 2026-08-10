@@ -217,13 +217,16 @@ def compute_fixed_wing_cruise(
     }
 
 
-def _max_available_thrust_n(
+def max_available_thrust_n(
     motor_count: int, propeller_diameter_in: float, motor_kv: float, battery_cells: int, air_density: float
 ) -> float:
     """Total thrust at maximum available RPM (motor_kv * pack voltage) --
     the same static thrust formula motor_performance.py uses for required
     thrust, evaluated at max RPM instead, giving the real "how much
-    thrust could this setup produce at full throttle" figure."""
+    thrust could this setup produce at full throttle" figure. Public (not
+    module-private) since app/services/path_planner.py's minimum-jerk
+    trajectory smoothing also reuses this to derive a real max
+    acceleration bound from motor specs -- see that module."""
     diameter_m = propeller_diameter_in * 0.0254
     nominal_voltage = battery_cells * LIPO_CELL_NOMINAL_VOLTAGE
     max_rpm = motor_kv * nominal_voltage
@@ -268,7 +271,7 @@ def compare_frames(
             air_density=air_density,
         )
 
-        max_thrust_n = _max_available_thrust_n(
+        max_thrust_n = max_available_thrust_n(
             motor_count, propeller_diameter_in, motor_kv, battery_cells, air_density
         )
         weight_n = mass_kg * GRAVITY_MPS2

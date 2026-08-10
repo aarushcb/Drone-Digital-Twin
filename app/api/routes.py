@@ -20,6 +20,7 @@ from datetime import datetime
 from dataclasses import asdict
 import tempfile
 import os
+import math
 
 from app.database.database import get_db
 from app.api.deps import get_current_user
@@ -31,6 +32,7 @@ from app.schemas.path_plan import (
     PathPlanRequest, PathPlanResponse, PathPoint,
     PathPlanRequest3D, PathPlanResponse3D, PathPoint3D,
     PathPlanRequestProbabilistic, PathPlanResponseProbabilistic,
+    PathPlanSmoothRequest, PathPlanSmoothResponse, TrajectoryPoint,
 )
 from app.schemas.environment import EnvironmentSimulationRequest
 from app.schemas.parameter_sweep import ParameterSweepRequest
@@ -43,7 +45,7 @@ from app.services.drone_analytics import calculate_analytics
 from app.services.telemetry_broadcaster import manager
 from app.services.path_planner import (
     plan_path, path_distance_meters, plan_path_3d, path_distance_meters_3d,
-    plan_path_3d_probabilistic,
+    plan_path_3d_probabilistic, generate_minimum_jerk_trajectory,
 )
 from app.services.predictive_analytics import (
     estimate_battery_remaining,
@@ -61,7 +63,9 @@ from app.services.parameter_sweep import analyze_parameter_sweep
 from app.services.efficiency_landscape import compute_efficiency_landscape
 from app.services.sensor_calibration import analyze_calibration
 from app.services.control_loop import simulate_control_loop, build_real_control_loop_response
-from app.services.frame_comparison import compare_frames, VALID_FRAME_TYPES
+from app.services.frame_comparison import (
+    compare_frames, VALID_FRAME_TYPES, max_available_thrust_n, GRAVITY_MPS2, DEFAULT_CRUISE_VELOCITY_MPS,
+)
 
 router = APIRouter()
 
@@ -650,6 +654,141 @@ def plan_drone_path_probabilistic(
         mean_collision_probability=round(sum(risks) / len(risks), 4),
         distance_meters=round(distance, 2),
         estimated_time_seconds=round(estimated_time, 1) if estimated_time else None,
+    )
+
+
+# ---------- Minimum-jerk smoothed trajectory (built ON TOP OF plan_path_3d's
+# waypoints, not a change to /plan-path-3d) ----------
+
+# Used only as a fallback -- see _derive_max_acceleration_mps2 below --
+# when a drone doesn't have complete motor/prop/battery specs on file, so
+# there's no real physics to derive an acceleration bound from. A
+# moderate, gentle-camera-drone-representative figure (racing drones can
+# exceed 10 m/s^2; this deliberately errs conservative since it's a
+# fallback, not a measured value).
+DEFAULT_TRAJECTORY_MAX_ACCELERATION_MPS2 = 2.5
+
+
+def _derive_max_acceleration_mps2(db_drone) -> float:
+    """
+    A REAL max-acceleration bound derived from the drone's own spec, not
+    an arbitrary constant, when motor/prop/battery specs are on file:
+    max_available_thrust_n (frame_comparison.py -- total thrust at full
+    throttle) minus the thrust already spent just hovering (=weight)
+    leaves excess thrust available to accelerate. Decomposing the thrust
+    vector into a component that cancels gravity and a component that
+    provides horizontal acceleration (bounded by the same total thrust
+    magnitude, so this is a Pythagorean relationship) gives max
+    horizontal acceleration = g*sqrt(TWR^2 - 1), TWR = max_thrust/weight
+    -- 0 at TWR=1 (all available thrust needed just to hover, nothing
+    left over) and approaching g*TWR for large TWR, both physically
+    sensible limits. Falls back to DEFAULT_TRAJECTORY_MAX_ACCELERATION_MPS2
+    if motor specs are incomplete or the drone can't even hover (TWR<=1).
+    """
+    if not has_complete_motor_specs(db_drone):
+        return DEFAULT_TRAJECTORY_MAX_ACCELERATION_MPS2
+
+    max_thrust_n = max_available_thrust_n(
+        motor_count=db_drone.motor_count,
+        propeller_diameter_in=db_drone.propeller_diameter_in,
+        motor_kv=db_drone.motor_kv,
+        battery_cells=db_drone.battery_cells,
+        air_density=1.225,  # sea-level ISA reference -- this is a planning-time capability bound, not a live-conditions estimate
+    )
+    weight_n = db_drone.mass_kg * GRAVITY_MPS2
+    if max_thrust_n <= weight_n:
+        return DEFAULT_TRAJECTORY_MAX_ACCELERATION_MPS2
+    return math.sqrt(max_thrust_n ** 2 - weight_n ** 2) / db_drone.mass_kg
+
+
+@router.post("/drones/{drone_id}/plan-path-smooth", response_model=PathPlanSmoothResponse)
+def plan_drone_path_smooth(
+    drone_id: int,
+    request: PathPlanSmoothRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Smooths /plan-path-3d's blocky, one-point-per-grid-cell A* waypoint
+    list into a continuous, dynamically-feasible trajectory (see
+    app/services/path_planner.py's generate_minimum_jerk_trajectory) --
+    runs plan_path_3d exactly like /plan-path-3d does, then feeds its
+    output waypoints into the smoother as a SEPARATE step. This is a new,
+    separate endpoint, not a change to /plan-path-3d -- that endpoint and
+    its existing behavior/tests are completely unaffected.
+
+    max_speed_mps/max_acceleration_mps2 default to this drone's own spec
+    (max_speed_mps as already stored; max_acceleration_mps2 derived from
+    real motor thrust-to-weight when the drone has complete motor specs,
+    see _derive_max_acceleration_mps2) but can be overridden per-request.
+    """
+    db_drone = _get_owned_drone_or_404(db, drone_id, current_user)
+
+    scene_objects = scene_object_crud.get_scene_objects(db, drone_id)
+    obstacles = [(o.x, o.y, o.z) for o in scene_objects if o.object_type == "obstacle"]
+    landing_points = [o for o in scene_objects if o.object_type == "landing"]
+
+    if not landing_points:
+        raise HTTPException(
+            status_code=404,
+            detail="No landing point set for this drone. Place one in the 3D view first.",
+        )
+
+    goal = (landing_points[0].x, landing_points[0].y, landing_points[0].z)
+    start = (request.start_x, request.start_y, request.start_z)
+
+    try:
+        raw_path = plan_path_3d(start=start, goal=goal, obstacles=obstacles)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if raw_path is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid path found — the landing point may be fully enclosed by obstacles.",
+        )
+
+    max_speed_mps = (
+        request.max_speed_mps
+        or db_drone.max_speed_mps
+        or DEFAULT_CRUISE_VELOCITY_MPS["quad"]
+    )
+    max_acceleration_mps2 = request.max_acceleration_mps2 or _derive_max_acceleration_mps2(db_drone)
+
+    try:
+        result = generate_minimum_jerk_trajectory(
+            waypoints=raw_path,
+            max_speed_mps=max_speed_mps,
+            max_acceleration_mps2=max_acceleration_mps2,
+            obstacles=obstacles,
+            sample_rate_hz=request.sample_rate_hz,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    distance = path_distance_meters_3d(raw_path)
+
+    return PathPlanSmoothResponse(
+        trajectory=[
+            TrajectoryPoint(
+                t=round(s["t"], 4),
+                x=round(s["position"][0], 4),
+                y=round(s["position"][1], 4),
+                z=round(s["position"][2], 4),
+                speed_mps=round(s["speed_mps"], 4),
+                acceleration_mps2=round(s["acceleration_mps2"], 4),
+            )
+            for s in result["samples"]
+        ],
+        keypoints=[PathPoint3D(x=p[0], y=p[1], z=p[2]) for p in result["keypoints"]],
+        raw_waypoint_count=result["raw_waypoint_count"],
+        keypoint_count=result["keypoint_count"],
+        distance_meters=round(distance, 2),
+        total_duration_seconds=result["total_duration_seconds"],
+        max_speed_mps_used=max_speed_mps,
+        max_acceleration_mps2_used=round(max_acceleration_mps2, 3),
+        max_realized_speed_mps=result["max_realized_speed_mps"],
+        max_realized_acceleration_mps2=result["max_realized_acceleration_mps2"],
     )
 
 

@@ -74,3 +74,49 @@ class PathPlanResponseProbabilistic(BaseModel):
     mean_collision_probability: float
     distance_meters: float
     estimated_time_seconds: Optional[float] = None
+
+
+# ---------- Minimum-jerk smoothed trajectory, built ON TOP OF plan_path_3d's
+# own output (see app/services/path_planner.py's
+# generate_minimum_jerk_trajectory) -- again a separate request/response
+# model, not a change to PathPlanRequest3D/PathPlanResponse3D, so
+# /plan-path-3d and its behavior are completely unaffected. ----------
+
+class PathPlanSmoothRequest(BaseModel):
+    start_x: float = 0
+    start_y: float = 0
+    start_z: float = 0
+
+    # Overrides for the drone's own max_speed_mps (from its stored spec)
+    # and a derived max acceleration (from motor thrust-to-weight -- see
+    # routes.py) -- optional, only needed to try a different constraint
+    # than the drone's own spec/defaults.
+    max_speed_mps: Optional[float] = None
+    max_acceleration_mps2: Optional[float] = None
+
+    # How many trajectory samples per second of flight time to return --
+    # an output-resolution knob only, doesn't affect the underlying
+    # polynomial trajectory itself.
+    sample_rate_hz: float = 10.0
+
+
+class TrajectoryPoint(BaseModel):
+    t: float
+    x: float
+    y: float
+    z: float
+    speed_mps: float
+    acceleration_mps2: float
+
+
+class PathPlanSmoothResponse(BaseModel):
+    trajectory: List[TrajectoryPoint]
+    keypoints: List[PathPoint3D]   # simplified waypoints the spline was actually fit through
+    raw_waypoint_count: int        # how many points plan_path_3d's grid search returned
+    keypoint_count: int            # how many survived safety-aware simplification
+    distance_meters: float
+    total_duration_seconds: float
+    max_speed_mps_used: float
+    max_acceleration_mps2_used: float
+    max_realized_speed_mps: float
+    max_realized_acceleration_mps2: float
