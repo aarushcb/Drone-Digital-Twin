@@ -1048,6 +1048,15 @@ def get_digital_twin(
             "mass_kg": db_drone.mass_kg,
             "motor_count": db_drone.motor_count,
             "max_thrust_n": db_drone.max_thrust_n,
+            # battery_cells (LiPo "S" rating / nominal voltage) and
+            # battery_capacity_mah (capacity) are two DIFFERENT, both
+            # independently optional spec fields -- e.g. "4S 3500mAh" is
+            # a normal, coherent battery description, not two ways of
+            # saying the same thing. Both are included here (cells was
+            # previously missing from this response entirely) so a drone
+            # with only one of the two set doesn't display an unrelated
+            # value with no way to tell which spec it actually is.
+            "battery_cells": db_drone.battery_cells,
             "battery_capacity_mah": db_drone.battery_capacity_mah,
             "max_speed_mps": db_drone.max_speed_mps,
         },
