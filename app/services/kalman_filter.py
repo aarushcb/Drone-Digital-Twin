@@ -68,11 +68,73 @@ assumed measurement noise std, and confirmed the filtered output's RMSE
 against the known ground truth is substantially lower than the raw noisy
 readings' RMSE -- see test_kalman_filter.py. This is a real, numeric
 noise-reduction check, not a "looks smoother" eyeball test.
+
+LARGE TIME-GAP HANDLING -- TRACK RESET, NOT AN UNBOUNDED COAST:
+Both process noise formulas above grow with dt^3/dt^4 -- correct for
+modeling how quickly a real constant-velocity assumption's uncertainty
+should degrade between CLOSELY-SPACED readings, but with no upper bound
+on dt, a genuinely large real-world gap between readings (this app's
+telemetry history for one drone can span idle days/weeks between
+flights) makes that same formula produce an astronomically large,
+numerically meaningless covariance -- found and confirmed directly
+during regression testing: a 7-day gap fed into the unmodified formula
+produced a reported position uncertainty of 162 BILLION meters.
+
+The fix is a TRACK RESET at a gap threshold, not a capped/clamped dt.
+This is the standard technique for exactly this situation in Kalman
+filtering / target-tracking practice -- see Bar-Shalom, Li & Kirubarajan,
+"Estimation with Applications to Tracking and Navigation" (Wiley, 2001),
+the same reference already cited above for the process noise model
+itself, which covers "track loss and reinitialization" for gaps beyond a
+sensor's expected update interval. The reasoning: capping dt at, say,
+30 seconds would make the filter silently PRETEND only 30 seconds of
+uncertainty growth happened after a week-long gap -- a fabricated,
+still-wrong number, just a smaller and less obviously-broken one, and it
+would also keep propagating the OLD position/velocity estimate forward
+as if the constant-velocity motion model remained valid across a gap
+where the drone could have flown anywhere, landed, been moved, or been
+stored for a week -- an assumption with no justification once the gap is
+that large. A reset is honest instead: past the gap threshold, this
+reading is treated exactly like the very first reading of a brand new
+filter (state re-seeded directly from the new measurement, covariance
+reset to the same initial_variance a fresh filter starts with,
+innovation/nis reported as None for that point, same as the actual first
+reading already does) -- "I have no carried-over information from before
+this gap," which is the truth, rather than a number that LOOKS like
+carried-over information but isn't meaningful.
+
+THE THRESHOLD -- MAX_TRACK_GAP_SECONDS = 30.0: this app's telemetry is
+expected at roughly 1 reading/second during an active flight (see the
+WebSocket ingestion path and simulate_telemetry.py) -- 30 seconds is
+therefore already ~30 consecutive missed updates, comfortably past
+"brief network hiccup" and into "this isn't a continuously-tracked
+flight anymore" territory. It's deliberately in the same neighborhood as
+(though a separate constant from, since it serves a different piece of
+code) digital_twin.py's SESSION_GAP_SECONDS=45, which already treats a
+45-second gap as the boundary between two separate flight sessions
+elsewhere in this app -- 30s here is intentionally a little tighter,
+since it's reasonable for the FILTER to stop trusting its own
+constant-velocity model slightly before the broader app-level "is this a
+new flight" boundary is reached.
+
+WHAT WAS VERIFIED: a constructed 7-day-gap scenario now produces a
+bounded, initial-variance-scale uncertainty (not exploding) at the reset
+point, identical in form to the very first reading of any filter run;
+normal closely-spaced (~1s) readings are completely unaffected (dt never
+approaches the threshold) -- see test_kalman_filter.py.
 """
 
 import math
 from datetime import datetime
 from typing import List, Optional, Tuple
+
+# Any gap between consecutive readings larger than this is treated as a
+# track reset (reinitialize the filter from the new reading) rather than
+# predicting/propagating uncertainty across the gap -- see the module
+# docstring's LARGE TIME-GAP HANDLING section above for the full
+# justification. Shared by both filters below (1D altitude and 9D full
+# state), since it's the same underlying concern for either.
+MAX_TRACK_GAP_SECONDS = 30.0
 
 
 class KalmanFilter1D:
@@ -188,18 +250,21 @@ def smooth_altitude_series(
         measurement_noise_std=measurement_noise_std,
     )
 
+    def _result_row(ts, altitude, innovation=None, nis=None):
+        return {
+            "timestamp": ts,
+            "raw_altitude": altitude,
+            "filtered_altitude": round(kf.position, 3),
+            "vertical_velocity_mps": round(kf.velocity, 3),
+            "altitude_std_dev": round(kf.position_std_dev, 3),
+            "innovation": round(innovation, 4) if innovation is not None else None,
+            "nis": round(nis, 3) if nis is not None else None,
+        }
+
     # First point has no prediction to compare against yet (nothing to
     # form an innovation from), so innovation/nis are reported as None --
     # an honest "not applicable yet," not a fabricated zero.
-    results = [{
-        "timestamp": readings[0][0],
-        "raw_altitude": readings[0][1],
-        "filtered_altitude": round(kf.position, 3),
-        "vertical_velocity_mps": round(kf.velocity, 3),
-        "altitude_std_dev": round(kf.position_std_dev, 3),
-        "innovation": None,
-        "nis": None,
-    }]
+    results = [_result_row(readings[0][0], readings[0][1])]
 
     prev_ts = readings[0][0]
     for ts, altitude in readings[1:]:
@@ -210,17 +275,20 @@ def smooth_altitude_series(
             # telemetry" issue in CLAUDE.md) -- skip the predict step
             # rather than dividing by a zero/negative dt.
             continue
+        if dt > MAX_TRACK_GAP_SECONDS:
+            # Track reset -- see module docstring's LARGE TIME-GAP
+            # HANDLING section. This reading starts a fresh filter,
+            # exactly like the very first reading above.
+            kf = KalmanFilter1D(
+                initial_position=altitude,
+                process_noise_accel_std=process_noise_accel_std,
+                measurement_noise_std=measurement_noise_std,
+            )
+            results.append(_result_row(ts, altitude))
+            continue
         kf.predict(dt)
         kf.update(altitude)
-        results.append({
-            "timestamp": ts,
-            "raw_altitude": altitude,
-            "filtered_altitude": round(kf.position, 3),
-            "vertical_velocity_mps": round(kf.velocity, 3),
-            "altitude_std_dev": round(kf.position_std_dev, 3),
-            "innovation": round(kf.last_innovation, 4) if kf.last_innovation is not None else None,
-            "nis": round(kf.last_nis, 3) if kf.last_nis is not None else None,
-        })
+        results.append(_result_row(ts, altitude, kf.last_innovation, kf.last_nis))
 
     return results
 
@@ -598,16 +666,20 @@ def fuse_full_state(readings: List[dict]) -> List[dict]:
     lat0 = next((r["latitude"] for r in readings if r.get("latitude") is not None), None)
     lon0 = next((r["longitude"] for r in readings if r.get("longitude") is not None), None)
 
-    first = readings[0]
-    initial_alt = first.get("altitude") or 0.0
-    initial_x, initial_y = 0.0, 0.0
-    if lat0 is not None and lon0 is not None and first.get("latitude") is not None:
-        initial_x, initial_y = latlon_to_local_meters(first["latitude"], first["longitude"], lat0, lon0)
+    def _initial_state_for(r) -> list:
+        # lat0/lon0 (the ORIGIN of the whole series' local coordinate
+        # frame) stay fixed across a track reset -- only the filter's
+        # own state/covariance reinitializes, so x_east/y_north in the
+        # returned series remain relative to one consistent origin
+        # throughout, reset or not.
+        x, y = 0.0, 0.0
+        if lat0 is not None and lon0 is not None and r.get("latitude") is not None:
+            x, y = latlon_to_local_meters(r["latitude"], r["longitude"], lat0, lon0)
+        return [x, y, r.get("altitude") or 0.0, 0.0, 0.0, 0.0,
+                r.get("roll") or 0.0, r.get("pitch") or 0.0, r.get("yaw") or 0.0]
 
-    ekf = ExtendedKalmanFilter9D(initial_state=[
-        initial_x, initial_y, initial_alt, 0.0, 0.0, 0.0,
-        first.get("roll") or 0.0, first.get("pitch") or 0.0, first.get("yaw") or 0.0,
-    ])
+    first = readings[0]
+    ekf = ExtendedKalmanFilter9D(initial_state=_initial_state_for(first))
 
     def _apply_measurements(r):
         if lat0 is not None and r.get("latitude") is not None and r.get("longitude") is not None:
@@ -629,6 +701,13 @@ def fuse_full_state(readings: List[dict]) -> List[dict]:
         prev_ts = r["timestamp"]
         if dt <= 0:
             continue  # duplicate/out-of-order timestamp, same handling as smooth_altitude_series
+        if dt > MAX_TRACK_GAP_SECONDS:
+            # Track reset -- see module docstring's LARGE TIME-GAP
+            # HANDLING section. This reading starts a fresh filter,
+            # exactly like the very first reading above.
+            ekf = ExtendedKalmanFilter9D(initial_state=_initial_state_for(r))
+            results.append({"timestamp": r["timestamp"], **ekf.state_dict})
+            continue
         ekf.predict(dt)
         _apply_measurements(r)
         results.append({"timestamp": r["timestamp"], **ekf.state_dict})

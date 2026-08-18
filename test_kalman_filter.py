@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from datetime import datetime, timedelta
 from app.services.kalman_filter import (
     smooth_altitude_series, KalmanFilter1D, detect_sensor_faults,
-    NIS_THRESHOLD_95,
+    NIS_THRESHOLD_95, MAX_TRACK_GAP_SECONDS,
 )
 
 
@@ -178,6 +178,63 @@ def test_injected_sensor_fault_is_detected():
     print(f"PASS: injected fault at t=100s detected at t={100 + delay_seconds:.0f}s -> {faults[0]}")
 
 
+def test_large_time_gap_resets_instead_of_exploding():
+    # THE BUG THIS TESTS: process noise scales with dt^3/dt^4 (see module
+    # docstring) -- with no cap, a real multi-day gap between readings
+    # (a drone idle for a week between flights) used to produce an
+    # astronomically large, numerically meaningless covariance. Found via
+    # run_full_regression.py: a 7-day gap produced a reported position
+    # uncertainty of 162 BILLION meters. Reproduces that exact scenario.
+    start = datetime(2026, 1, 1, 12, 0, 0)
+    readings = [(start + timedelta(seconds=i), 30.0 + (0.1 if i % 2 == 0 else -0.1)) for i in range(10)]
+    gap_reading_index = len(readings)
+    readings.append((start + timedelta(days=7), 30.0))  # 7-day gap
+    readings += [
+        (start + timedelta(days=7, seconds=i + 1), 30.0 + (0.1 if i % 2 == 0 else -0.1)) for i in range(5)
+    ]
+
+    result = smooth_altitude_series(readings)
+    gap_point = result[gap_reading_index]
+
+    # A track reset reports innovation/nis as None, exactly like the
+    # very first reading of any run -- there's genuinely nothing to form
+    # an innovation from right after a reset.
+    assert gap_point["innovation"] is None and gap_point["nis"] is None, (
+        f"Expected a reset point to report innovation/nis as None, got {gap_point}"
+    )
+    # Bounded by roughly the fresh-filter initial variance (10.0 -> std
+    # dev sqrt(10)=3.16), NOT anything approaching the old bug's
+    # 162,000,000,000m.
+    assert gap_point["altitude_std_dev"] < 20, (
+        f"Expected a bounded, fresh-filter-scale std_dev after the gap, got {gap_point['altitude_std_dev']}"
+    )
+    # And the filter should reconverge normally afterward, same as any
+    # fresh filter run -- the reset isn't a permanently broken state.
+    last = result[-1]
+    assert last["altitude_std_dev"] < 5, f"Expected normal reconvergence after the reset, got {last}"
+    print(
+        f"PASS: 7-day gap -> reset (std_dev={gap_point['altitude_std_dev']}m, "
+        f"was 162 BILLION meters before this fix), reconverges to std_dev={last['altitude_std_dev']}m afterward"
+    )
+
+
+def test_gap_just_under_threshold_does_not_reset():
+    # The reset should trigger strictly ABOVE MAX_TRACK_GAP_SECONDS, not
+    # on ordinary operation -- confirms normal (if slightly sparse)
+    # telemetry isn't spuriously reset.
+    start = datetime(2026, 1, 1, 12, 0, 0)
+    readings = [
+        (start, 30.0),
+        (start + timedelta(seconds=MAX_TRACK_GAP_SECONDS - 1), 30.2),
+    ]
+    result = smooth_altitude_series(readings)
+    assert result[1]["innovation"] is not None, (
+        f"A gap just under the threshold should predict+update normally (innovation present), got {result[1]}"
+    )
+    print(f"PASS: a {MAX_TRACK_GAP_SECONDS - 1}s gap (just under the {MAX_TRACK_GAP_SECONDS}s threshold) "
+          f"predicts/updates normally, does not reset")
+
+
 if __name__ == "__main__":
     test_filter_reduces_noise_below_raw_readings()
     test_filter_recovers_a_reasonable_climb_rate()
@@ -185,4 +242,6 @@ if __name__ == "__main__":
     test_filter_state_converges_toward_a_constant_measurement()
     test_healthy_noisy_sensor_produces_no_false_fault_flags()
     test_injected_sensor_fault_is_detected()
+    test_large_time_gap_resets_instead_of_exploding()
+    test_gap_just_under_threshold_does_not_reset()
     print("\nAll Kalman filter tests passed.")

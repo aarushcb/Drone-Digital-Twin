@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from datetime import datetime, timedelta
 from app.services.kalman_filter import (
     ExtendedKalmanFilter9D, fuse_full_state, latlon_to_local_meters, EARTH_RADIUS_M,
+    MAX_TRACK_GAP_SECONDS,
 )
 
 
@@ -156,6 +157,50 @@ def test_covariance_shrinks_with_repeated_consistent_measurements():
     print(f"PASS: position covariance shrank from {initial_p00} to {ekf.P[0][0]:.4f}, converged to x_east={ekf.x[0]:.3f}")
 
 
+def test_large_time_gap_resets_instead_of_exploding():
+    # Same bug/fix as the 1D altitude filter's equivalent test -- see
+    # test_kalman_filter.py's test_large_time_gap_resets_instead_of_exploding
+    # for the full story. Reproduces the exact scenario found via
+    # run_full_regression.py: a 7-day gap used to produce a reported
+    # position_uncertainty_m of 162 BILLION meters.
+    start = datetime(2026, 1, 1, 12, 0, 0)
+    readings = [
+        {"timestamp": start + timedelta(seconds=i), "latitude": 37.7749, "longitude": -122.4194,
+         "altitude": 30.0, "speed": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0}
+        for i in range(10)
+    ]
+    gap_reading_index = len(readings)
+    readings.append({
+        "timestamp": start + timedelta(days=7), "latitude": 37.7749, "longitude": -122.4194,
+        "altitude": 30.0, "speed": 0.0, "roll": 0.0, "pitch": 0.0, "yaw": 0.0,
+    })
+
+    result = fuse_full_state(readings)
+    gap_point = result[gap_reading_index]
+
+    assert gap_point["position_uncertainty_m"] < 20, (
+        f"Expected a bounded, fresh-filter-scale uncertainty after the gap, got {gap_point}"
+    )
+    assert all(math.isfinite(v) for k, v in gap_point.items() if k != "timestamp"), f"Non-finite value: {gap_point}"
+    print(
+        f"PASS: 7-day gap -> reset (position_uncertainty_m={gap_point['position_uncertainty_m']}, "
+        f"was 162 BILLION meters before this fix)"
+    )
+
+
+def test_gap_just_under_threshold_does_not_reset():
+    ekf = ExtendedKalmanFilter9D(initial_state=[0, 0, 0, 0, 0, 0, 0, 0, 0], initial_variance=100.0)
+    initial_p00 = ekf.P[0][0]
+    ekf.predict(dt=MAX_TRACK_GAP_SECONDS - 1)
+    # A predict() alone (no reset) grows P from process noise as normal --
+    # confirms the reset path isn't taken for an ordinary predict() call
+    # just under the threshold (fuse_full_state's own gap-check is
+    # exercised directly in the test above; this isolates predict() itself).
+    assert ekf.P[0][0] > initial_p00, "Expected normal process-noise growth just under the threshold"
+    assert math.isfinite(ekf.P[0][0])
+    print(f"PASS: predict(dt={MAX_TRACK_GAP_SECONDS - 1}s) grows covariance normally (P[0][0]={ekf.P[0][0]:.2f}), no explosion")
+
+
 if __name__ == "__main__":
     test_latlon_projection_matches_known_reference()
     test_speed_jacobian_matches_finite_difference()
@@ -163,4 +208,6 @@ if __name__ == "__main__":
     test_graceful_degradation_with_missing_fields()
     test_duplicate_timestamp_does_not_crash()
     test_covariance_shrinks_with_repeated_consistent_measurements()
+    test_large_time_gap_resets_instead_of_exploding()
+    test_gap_just_under_threshold_does_not_reset()
     print("\nAll EKF tests passed.")
