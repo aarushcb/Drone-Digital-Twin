@@ -79,6 +79,42 @@ def get_control_loop_samples(db: Session, drone_id: int, limit: int = 300) -> li
     return list(reversed(rows))
 
 
+def get_calibration_imu_samples(db: Session, drone_id: int, limit: int = 200) -> list[Telemetry]:
+    """
+    Returns the most recent telemetry rows for a drone that carry REAL
+    raw IMU data (accel_x/gyro_x -- from a MAVLink log's SCALED_IMU/
+    RAW_IMU messages, see app/services/mavlink_import.py) AND were logged
+    while the drone was NOT flying (flight_state == "idle").
+
+    WHY THE flight_state FILTER MATTERS (this is a correctness
+    requirement, not just a nice-to-have): app/services/sensor_calibration.py's
+    accelerometer/gyroscope checks assume the sensor was STATIONARY when
+    the readings were captured (a perfect accelerometer reads exactly
+    (0,0,+9.81) at rest; a perfect gyroscope reads exactly 0 deg/s on
+    every axis at rest) -- that's the actual physical basis of a static
+    IMU calibration check. Raw IMU rows captured DURING FLIGHT reflect
+    real maneuvering acceleration/rotation, not sensor bias/noise, and
+    running the stationary check on them would produce a meaningless (or
+    actively misleading) "FAIL" on a perfectly good sensor. flight_state
+    == "idle" (disarmed -- see mavlink_import.py's HEARTBEAT-derived
+    flight_state) is the closest proxy this schema has for "the drone was
+    genuinely sitting still," matching how real static IMU calibration is
+    actually performed (disarmed, on a bench).
+    """
+    rows = (
+        db.query(Telemetry)
+        .filter(
+            Telemetry.drone_id == drone_id,
+            Telemetry.flight_state == "idle",
+            (Telemetry.accel_x.isnot(None)) | (Telemetry.gyro_x.isnot(None)),
+        )
+        .order_by(Telemetry.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return list(reversed(rows))
+
+
 def bulk_create_telemetry(db: Session, points: list[dict], drone_id: int) -> int:
     """
     Inserts many telemetry rows in one transaction -- used by MAVLink log

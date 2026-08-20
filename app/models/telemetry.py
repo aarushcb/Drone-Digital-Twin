@@ -61,6 +61,21 @@ class Telemetry(Base):
     motor_pwm_3 = Column(Float, nullable=True)    # microseconds, ESC/servo output
     motor_pwm_4 = Column(Float, nullable=True)    # microseconds, ESC/servo output
 
+    # Added so the Sensor Calibration Guide (app/services/sensor_calibration.py)
+    # can check a real accelerometer/gyroscope calibration instead of only
+    # ever simulating one -- ordinary telemetry (roll/pitch/yaw are fused
+    # ATTITUDE angles, not raw sensor axes) never populates these, but a
+    # MAVLink log import (see app/services/mavlink_import.py) can, from
+    # that log's RAW_IMU/SCALED_IMU messages. All nullable/optional --
+    # every existing telemetry row and every existing write path is
+    # unaffected.
+    accel_x = Column(Float, nullable=True)  # m/s^2, raw accelerometer, body frame
+    accel_y = Column(Float, nullable=True)  # m/s^2, raw accelerometer, body frame
+    accel_z = Column(Float, nullable=True)  # m/s^2, raw accelerometer, body frame
+    gyro_x = Column(Float, nullable=True)   # deg/s, raw gyroscope, body frame
+    gyro_y = Column(Float, nullable=True)   # deg/s, raw gyroscope, body frame
+    gyro_z = Column(Float, nullable=True)   # deg/s, raw gyroscope, body frame
+
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
     drone = relationship("Drone", back_populates="telemetry")

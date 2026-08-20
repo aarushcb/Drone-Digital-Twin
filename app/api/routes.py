@@ -895,6 +895,64 @@ def calibration_check(
     )
 
 
+# Needs a reasonable sample size for bias/noise statistics to actually
+# mean something -- similar order of magnitude to control-loop's own
+# MIN_REAL_CONTROL_LOOP_SAMPLES=5 (app/services/control_loop.py), a
+# little higher here since a static calibration check genuinely wants
+# more than a handful of stationary samples to characterize noise.
+MIN_REAL_CALIBRATION_SAMPLES = 10
+
+
+@router.get("/drones/{drone_id}/telemetry/imu-calibration")
+def imu_calibration_real(
+    drone_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Real-data counterpart to POST /calibration-check above, for the
+    accelerometer/gyroscope steps specifically -- same real-vs-simulated
+    pattern as GET /drones/{id}/telemetry/control-loop: if this drone's
+    telemetry has enough real, stationary (flight_state="idle") raw IMU
+    data (from a MAVLink log's SCALED_IMU/RAW_IMU messages -- see
+    app/services/mavlink_import.py), that real data is analyzed and
+    returned, clearly labeled "data_source": "real". Compass/ESC aren't
+    covered (this app doesn't store raw magnetometer or per-motor ESC
+    telemetry) -- callers should still use the existing POST
+    /calibration-check simulated-demo flow for those two steps, and for
+    accel/gyro too whenever this endpoint reports "unavailable".
+    """
+    _get_owned_drone_or_404(db, drone_id, current_user)
+
+    samples = telemetry_crud.get_calibration_imu_samples(db, drone_id)
+    accel_x = [s.accel_x for s in samples if s.accel_x is not None]
+    accel_y = [s.accel_y for s in samples if s.accel_y is not None]
+    accel_z = [s.accel_z for s in samples if s.accel_z is not None]
+    gyro_x = [s.gyro_x for s in samples if s.gyro_x is not None]
+    gyro_y = [s.gyro_y for s in samples if s.gyro_y is not None]
+    gyro_z = [s.gyro_z for s in samples if s.gyro_z is not None]
+
+    accel_available = len(accel_x) >= MIN_REAL_CALIBRATION_SAMPLES and len(accel_x) == len(accel_y) == len(accel_z)
+    gyro_available = len(gyro_x) >= MIN_REAL_CALIBRATION_SAMPLES and len(gyro_x) == len(gyro_y) == len(gyro_z)
+
+    result = analyze_calibration(
+        accel_x=accel_x if accel_available else None,
+        accel_y=accel_y if accel_available else None,
+        accel_z=accel_z if accel_available else None,
+        gyro_x=gyro_x if gyro_available else None,
+        gyro_y=gyro_y if gyro_available else None,
+        gyro_z=gyro_z if gyro_available else None,
+    )
+
+    return {
+        "data_source": "real" if (accel_available or gyro_available) else "unavailable",
+        "accelerometer": result["accelerometer"],
+        "accelerometer_sample_count": len(accel_x) if accel_available else 0,
+        "gyroscope": result["gyroscope"],
+        "gyroscope_sample_count": len(gyro_x) if gyro_available else 0,
+    }
+
+
 # ---------- Attitude control loop visualization (educational simulation) ----------
 
 @router.get("/drones/{drone_id}/telemetry/control-loop")

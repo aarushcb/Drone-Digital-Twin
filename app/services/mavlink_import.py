@@ -21,6 +21,10 @@ It's a stream of small independent messages arriving at different rates:
     the controller's desired roll/pitch/yaw, as a quaternion
   - SERVO_OUTPUT_RAW (~a few Hz, only sent by autopilots that report it):
     raw ESC/servo PWM outputs
+  - SCALED_IMU / RAW_IMU (~a few Hz to ~50Hz, only sent by autopilots that
+    report it): raw accelerometer + gyroscope + magnetometer axes -- only
+    accel/gyro are stored (see app/models/telemetry.py); magnetometer
+    isn't currently a stored column
 None of these arrive at the same instant. So this parser does a forward-fill
 merge: it walks every message in chronological order, keeps track of the
 LATEST known value for each field, and emits one combined telemetry row
@@ -62,10 +66,42 @@ class ImportedTelemetryPoint:
     motor_pwm_2: Optional[float] = None
     motor_pwm_3: Optional[float] = None
     motor_pwm_4: Optional[float] = None
+    # Raw IMU axes, when the log has them (see app/models/telemetry.py) --
+    # from SCALED_IMU/RAW_IMU, converted to real physical units (m/s^2,
+    # deg/s) -- see _accel_mg_to_mps2/_gyro_mrad_s_to_deg_s below for the
+    # conversion and its sourcing. Forward-filled the same way as every
+    # other field here; stay None for logs/aircraft that never send these.
+    accel_x: Optional[float] = None
+    accel_y: Optional[float] = None
+    accel_z: Optional[float] = None
+    gyro_x: Optional[float] = None
+    gyro_y: Optional[float] = None
+    gyro_z: Optional[float] = None
 
 
 class MavlinkImportError(Exception):
     pass
+
+
+# Same standard gravity constant already used throughout this app (see
+# e.g. sensor_calibration.py's GRAVITY_MPS2, motor_performance.py) --
+# duplicated here (not imported) since these are two independent service
+# modules and this is a single well-known physical constant, the same
+# minor, documented duplication pattern already used elsewhere in this app.
+GRAVITY_MPS2 = 9.81
+
+
+def _accel_mg_to_mps2(milli_g: float) -> float:
+    """SCALED_IMU/SCALED_IMU2/SCALED_IMU3's xacc/yacc/zacc fields are
+    documented (see the MAVLink common.xml message definition) in mG
+    (milli-g, i.e. thousandths of standard gravity) -- converts to m/s^2."""
+    return (milli_g / 1000.0) * GRAVITY_MPS2
+
+
+def _gyro_mrad_s_to_deg_s(milli_rad_per_s: float) -> float:
+    """SCALED_IMU/SCALED_IMU2/SCALED_IMU3's xgyro/ygyro/zgyro fields are
+    documented in mrad/s (milli-radians/second) -- converts to deg/s."""
+    return math.degrees(milli_rad_per_s / 1000.0)
 
 
 def _quaternion_to_euler_deg(q) -> tuple:
@@ -116,6 +152,12 @@ def parse_mavlink_log(file_path: str) -> list[ImportedTelemetryPoint]:
     latest_pwm2: Optional[float] = None
     latest_pwm3: Optional[float] = None
     latest_pwm4: Optional[float] = None
+    latest_accel_x: Optional[float] = None
+    latest_accel_y: Optional[float] = None
+    latest_accel_z: Optional[float] = None
+    latest_gyro_x: Optional[float] = None
+    latest_gyro_y: Optional[float] = None
+    latest_gyro_z: Optional[float] = None
     armed = False
 
     points: list[ImportedTelemetryPoint] = []
@@ -171,6 +213,38 @@ def parse_mavlink_log(file_path: str) -> list[ImportedTelemetryPoint]:
             latest_pwm3 = float(msg.servo3_raw) if getattr(msg, "servo3_raw", 0) else None
             latest_pwm4 = float(msg.servo4_raw) if getattr(msg, "servo4_raw", 0) else None
 
+        elif msg_type in ("SCALED_IMU", "SCALED_IMU2", "SCALED_IMU3"):
+            # Preferred over RAW_IMU below: SCALED_IMU's xacc/yacc/zacc/
+            # xgyro/ygyro/zgyro fields have real, protocol-documented
+            # units (mG, mrad/s -- see MAVLink's common.xml) that this
+            # conversion is verified against (test_mavlink_import.py).
+            latest_accel_x = _accel_mg_to_mps2(msg.xacc)
+            latest_accel_y = _accel_mg_to_mps2(msg.yacc)
+            latest_accel_z = _accel_mg_to_mps2(msg.zacc)
+            latest_gyro_x = _gyro_mrad_s_to_deg_s(msg.xgyro)
+            latest_gyro_y = _gyro_mrad_s_to_deg_s(msg.ygyro)
+            latest_gyro_z = _gyro_mrad_s_to_deg_s(msg.zgyro)
+
+        elif msg_type == "RAW_IMU":
+            # RAW_IMU's fields have NO protocol-guaranteed physical units
+            # (they're literally "raw," device-specific ADC-scale values)
+            # -- but in practice, both ArduPilot and PX4 populate RAW_IMU
+            # with the same mG/mrad/s scaling SCALED_IMU formally
+            # documents, so the same conversion is applied here as a
+            # documented practical convention, not a protocol guarantee.
+            # Only used as a fallback: if this log ALSO has any
+            # SCALED_IMU-family message, those take precedence simply by
+            # arriving later in a typical log's message ordering and
+            # overwriting these same latest_* variables -- if a log has
+            # RAW_IMU only, this is what populates accel/gyro instead of
+            # leaving them empty.
+            latest_accel_x = _accel_mg_to_mps2(msg.xacc)
+            latest_accel_y = _accel_mg_to_mps2(msg.yacc)
+            latest_accel_z = _accel_mg_to_mps2(msg.zacc)
+            latest_gyro_x = _gyro_mrad_s_to_deg_s(msg.xgyro)
+            latest_gyro_y = _gyro_mrad_s_to_deg_s(msg.ygyro)
+            latest_gyro_z = _gyro_mrad_s_to_deg_s(msg.zgyro)
+
         elif msg_type == "GLOBAL_POSITION_INT":
             # This is the sync point: emit one combined row per position update.
             lat = msg.lat / 1e7
@@ -195,6 +269,12 @@ def parse_mavlink_log(file_path: str) -> list[ImportedTelemetryPoint]:
                 motor_pwm_2=latest_pwm2,
                 motor_pwm_3=latest_pwm3,
                 motor_pwm_4=latest_pwm4,
+                accel_x=latest_accel_x,
+                accel_y=latest_accel_y,
+                accel_z=latest_accel_z,
+                gyro_x=latest_gyro_x,
+                gyro_y=latest_gyro_y,
+                gyro_z=latest_gyro_z,
             ))
 
     if not points:
