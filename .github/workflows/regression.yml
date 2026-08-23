@@ -1,0 +1,45 @@
+name: Live backend regression
+
+# Runs run_full_regression.py against the LIVE Render backend after every
+# push to main. Render auto-deploys from main on push, so there's a race
+# between "GitHub Actions starts" and "Render finishes building/deploying" --
+# handled below by polling the backend's root endpoint until it responds,
+# instead of a blind fixed sleep (Render free-tier build times vary).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}  # lets it be re-run manually from the Actions tab too
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install httpx
+        run: pip install httpx==0.28.1
+
+      - name: Wait for Render deploy to go live
+        run: |
+          BASE_URL="https://drone-digital-twin-api.onrender.com"
+          DEADLINE=$((SECONDS + 360))
+          echo "Polling $BASE_URL until it responds (up to 6 minutes)..."
+          until curl -sf -o /dev/null "$BASE_URL/"; do
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "Backend never came up after 6 minutes -- proceeding anyway; regression script will report the failure clearly."
+              break
+            fi
+            sleep 15
+          done
+          # Extra buffer even after the server responds: a fresh deploy's
+          # DB connection pool can take a few more seconds to be fully
+          # ready (same Render free-tier cold-start behavior documented
+          # in run_full_regression.py's own retry logic).
+          sleep 15
+
+      - name: Run full regression suite against live backend
+        run: python3 run_full_regression.py
