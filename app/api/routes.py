@@ -36,6 +36,7 @@ from app.schemas.path_plan import (
 )
 from app.schemas.environment import EnvironmentSimulationRequest
 from app.schemas.parameter_sweep import ParameterSweepRequest
+from app.schemas.build_feasibility import BuildFeasibilityRequest
 from app.schemas.sensor_calibration import CalibrationCheckRequest
 from app.crud import drone as drone_crud
 from app.crud import telemetry as telemetry_crud
@@ -59,7 +60,7 @@ from app.services.bemt import analyze_bemt_hover, analyze_bemt_hover_in_wind
 from app.services.monte_carlo_uq import monte_carlo_hover_uncertainty, monte_carlo_wind_endurance_uncertainty
 from app.services.kalman_filter import smooth_altitude_series, detect_sensor_faults, fuse_full_state
 from app.services.mavlink_import import parse_mavlink_log, MavlinkImportError
-from app.services.parameter_sweep import analyze_parameter_sweep
+from app.services.parameter_sweep import analyze_parameter_sweep, analyze_sweep_point
 from app.services.efficiency_landscape import compute_efficiency_landscape
 from app.services.sensor_calibration import analyze_calibration
 from app.services.control_loop import simulate_control_loop, build_real_control_loop_response
@@ -1061,6 +1062,77 @@ def frames_compare(
         wing_area_m2=wing_area_m2,
         lift_to_drag_ratio=lift_to_drag_ratio,
     )
+
+
+# ---------- Build Feasibility Check (for shoppers, not owners) ----------
+# WHY THIS IS NOT SCOPED UNDER /drones/{id}, AND NOT THE SAME AS PARAMETER
+# SWEEP: Parameter Sweep answers "how would changing ONE spec on my
+# EXISTING drone affect it" -- it needs a real, already-registered Drone
+# row to read the "current" side of the comparison from. This endpoint
+# answers a different, earlier question -- "would this combination of
+# parts work AT ALL" -- for someone who hasn't bought anything yet and has
+# no drone to look one up by id. Reuses analyze_sweep_point() directly
+# (the same single-point hover/thrust/RPM/flight-time physics Parameter
+# Sweep itself calls for its "current" side -- see
+# app/services/parameter_sweep.py) so there's exactly one implementation
+# of this physics, not two. Still requires login, for the same auth
+# consistency as the rest of this API, but doesn't touch the database at
+# all (no `db` dependency).
+
+@router.post("/feasibility-check")
+def feasibility_check(
+    request: BuildFeasibilityRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Hover feasibility for a hypothetical spec someone is still shopping
+    for. Rejects frame_type="fixed_wing" outright rather than silently
+    running hover physics against an aircraft that doesn't hover --
+    fixed-wing feasibility is a cruise-endurance question, already
+    covered by /frames/compare's real Breguet-style physics, not this
+    hover-based one.
+    """
+    valid_build_frame_types = {"quadcopter", "hexacopter", "octocopter", "fixed_wing"}
+    if request.frame_type not in valid_build_frame_types:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid frame_type: {request.frame_type!r}. Valid options: "
+                f"{sorted(valid_build_frame_types)}."
+            ),
+        )
+    if request.frame_type == "fixed_wing":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Build Feasibility Check uses hover physics (required RPM, hover "
+                "power, hover-based flight time), which doesn't apply to a "
+                "fixed-wing aircraft -- there's no hover phase to check "
+                "feasibility for. Use Frame Comparison (/frames/compare) instead, "
+                "which has real fixed-wing cruise-endurance physics."
+            ),
+        )
+
+    result = analyze_sweep_point(
+        mass_kg=request.mass_kg,
+        motor_count=request.motor_count,
+        propeller_diameter_in=request.propeller_diameter_in,
+        motor_kv=request.motor_kv,
+        battery_cells=request.battery_cells,
+        battery_capacity_mah=request.battery_capacity_mah,
+    )
+    return {
+        "spec": {
+            "frame_type": request.frame_type,
+            "mass_kg": request.mass_kg,
+            "motor_count": request.motor_count,
+            "propeller_diameter_in": request.propeller_diameter_in,
+            "motor_kv": request.motor_kv,
+            "battery_cells": request.battery_cells,
+            "battery_capacity_mah": request.battery_capacity_mah,
+        },
+        **result,
+    }
 
 
 # ---------- Digital Twin (lifetime aggregation, wear & maintenance) ----------
