@@ -5,9 +5,10 @@ WHAT CHANGED FROM THE ORIGINAL:
 - Base.metadata.create_all(engine) runs on startup: this auto-creates any
   tables that don't exist yet from your models, so `python main.py` (or
   uvicorn) "just works" against a fresh SQLite file with zero manual setup.
-  NOTE: this is fine for local development, but once you're on a shared
-  production database, table changes should go through Alembic migrations
-  instead (added in alembic/ — see the README for when to switch).
+  NOTE: this only ever CREATES missing tables, it never ALTERs an existing
+  one -- for the real, shared Neon database, every schema change (new/
+  changed column, etc.) goes through an Alembic migration instead (see
+  alembic/ and CLAUDE.md's "Database migrations" section for the workflow).
 - CORS middleware added: without this, a browser-based client (or Flutter
   web build) would be blocked by the browser from calling this API at all,
   because it's a different origin. Mobile apps don't strictly need this, but
