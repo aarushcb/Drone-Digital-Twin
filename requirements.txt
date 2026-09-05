@@ -13,3 +13,25 @@ psycopg2-binary==2.9.10
 alembic==1.14.0
 pymavlink==2.4.49
 httpx==0.28.1  # test-only: needed by Starlette's TestClient for the WebSocket tests in test_telemetry_broadcaster.py
+
+# --- D1 Reality-Gap Quantifier (assets/docs/specs/D1-reality-gap-quantifier-spec.md) ---
+# WHY THESE EXACT PINS, NOT A FLOATING RANGE:
+# 1. scipy 1.18.x DROPPED Python 3.11 -- verified directly against PyPI: no
+#    3.11 wheel exists for 1.18.1 on either manylinux generation, and the
+#    last 3.11-compatible release is 1.17.1. This repo pins no Python
+#    version anywhere (no render.yaml, runtime.txt or .python-version), so
+#    the build uses whatever Render's dashboard is set to. 1.17.1 has
+#    manylinux wheels for 3.11, 3.12 AND 3.13, so it deploys on any of
+#    them. An unpinned `scipy` resolves to 1.18.x and would hard-fail the
+#    build if Render is still on 3.11.
+# 2. Spec 10.3 #16 requires byte-identical metrics across repeated runs.
+#    Floating scipy minor versions can change ks_2samp/welch numerics
+#    between releases, so pinning is a correctness requirement here, not
+#    just deploy hygiene.
+# numpy is listed EXPLICITLY even though scipy depends on it: the spec's
+# section 12 asserts "numpy already present", which is not true of this
+# repo -- it was absent from the venv and no existing dependency pulls it
+# in (pymavlink does not). It is a genuinely new direct dependency.
+numpy==2.3.4
+scipy==1.17.1
+pyulog==1.2.4
