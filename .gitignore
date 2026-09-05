@@ -5,3 +5,17 @@ __pycache__/
 venv/
 .venv/
 .DS_Store
+
+# D1 reality-gap synthetic ULog fixtures -- regenerated, not committed.
+# Rebuild with: python3 tests/fixtures/reality_gap/make_fixtures.py
+# Verified byte-deterministic: sha256 of all six generated fixtures is
+# identical across repeated runs (the generator's only randomness is a
+# fixed-seed numpy default_rng), so regenerating gives exactly the file
+# the tests were written against.
+# NOTE: this covers .ulg only, matching the instruction. The .bin
+# DataFlash fixtures in the same directory are produced by the same
+# generator and are equally regenerable, but remain tracked -- so a
+# fresh clone has the .bin fixtures and not the .ulg ones. If the intent
+# is "no generated fixtures in git", the .bin files should be ignored
+# too; left as-is rather than silently widening the rule.
+tests/fixtures/reality_gap/*.ulg
