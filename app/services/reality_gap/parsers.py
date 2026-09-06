@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from scipy import signal as sp_signal
 
 # ---------------------------------------------------------------------------
 # Format detection
@@ -174,6 +175,12 @@ class LogMeta:
     looks_simulated: Optional[bool] = None  # None = inconclusive, spec 2.2
     sim_evidence: List[str] = field(default_factory=list)
     actuator_pwm_range: Optional[Tuple[float, float]] = None
+    # A5: spec 3.7's rotor/noise band gate needs these. sensor_combined accel
+    # is low-passed at IMU_ACCEL_CUTOFF (30 Hz on this airframe), so a 20-100 Hz
+    # rotor-band ratio read off accel.* is measuring the autopilot's filter, not
+    # the airframe. Whoever computes 3.7 has to know where the wall is.
+    imu_accel_cutoff: Optional[float] = None
+    imu_gyro_cutoff: Optional[float] = None
 
 
 @dataclass
@@ -383,6 +390,12 @@ ULOG_DIRECT_MAP: List[Tuple[str, str, str, float]] = [
 DEFAULT_PWM_MIN = 1000.0
 DEFAULT_PWM_MAX = 2000.0
 
+# A5: raw FIFO IMU. Parsed in a SEPARATE ULog() pass, not added to
+# ULOG_TOPICS -- a 60 MB profile-529 log carries ~105k FIFO messages per
+# sensor (~23 MB of buffer each), and folding them into the main pass adds
+# that to its peak instead of overlapping with it.
+FIFO_TOPIC_KEYS = {"sensor_accel_fifo": "accel_fifo", "sensor_gyro_fifo": "gyro_fifo"}
+
 
 def parse_ulog(path: str) -> ParsedLog:
     """
@@ -463,10 +476,145 @@ def parse_ulog(path: str) -> ParsedLog:
             raw = np.asarray(act.data[fname], dtype=np.float64)
             _store(signals, warnings, f"act.out{i}", t, _normalise_actuator(raw, pwm_min, pwm_max))
 
-    meta = _ulog_meta(path, ulog, signals, params, (pwm_min, pwm_max))
+    # Arming state -> status.armed, so align.find_arm_anchor's arm_event
+    # branch is reachable on a real log. PX4 vehicle_status.arming_state:
+    # 1 = DISARMED, 2 = ARMED. Emitted as 0.0/1.0 because the canonical
+    # schema carries float signals, and find_arm_anchor tests > 0.5.
+    status = datasets.get("vehicle_status")
+    if status is not None and "arming_state" in status.data:
+        armed = (np.asarray(status.data["arming_state"], dtype=np.int32) == 2).astype(np.float64)
+        _store(signals, warnings, "status.armed", topic_time(status), armed)
+
+    # Free the main pass's buffers before the FIFO pass allocates its own,
+    # so the two never coexist at peak. Only the small info dict survives.
+    info = dict(getattr(ulog, "msg_info_dict", {}) or {})
+    del datasets, ulog
+    _parse_fifo_topics(path, signals, warnings)
+
+    meta = _ulog_meta(path, info, signals, params, (pwm_min, pwm_max))
     if not signals:
         raise EmptyLogError(f"{os.path.basename(path)} contains no usable telemetry")
     return ParsedLog(signals=signals, params=params, meta=meta, warnings=warnings)
+
+
+def _parse_fifo_topics(path: str, signals: Dict[str, Signal], warnings: List[str]) -> None:
+    """
+    A5: expand sensor_accel_fifo / sensor_gyro_fifo into canonical
+    accel_fifo.* / gyro_fifo.* signals.
+
+    WHY THESE TOPICS ARE NOT ONE-SAMPLE-PER-MESSAGE (the thing that makes
+    this different from every other topic here): a FIFO record carries a
+    BATCH -- fixed-width x[0..31]/y[..]/z[..] arrays, a `samples` count
+    saying how many of those 32 slots are actually valid, and a `dt`
+    giving the microseconds between consecutive samples WITHIN the batch.
+    On the reference log that is 104,830 messages x 10 valid samples at
+    dt=250 us, i.e. ~1.05 M samples at 4 kHz -- not the 210 Hz you would
+    get by treating one message as one sample.
+
+    The raw x/y/z are int16 ADC counts; `scale` converts them to SI
+    (m/s^2 for accel, rad/s for gyro) and is per-message, so it is applied
+    per-row rather than as a constant.
+
+    Sample timestamps are reconstructed as timestamp_sample + i*dt. PX4
+    documents timestamp_sample as the time of the FIRST sample in the
+    batch; if that convention is ever the last sample instead, every
+    reconstructed time shifts by at most samples*dt = 2.5 ms, which is an
+    eighth of one 50 Hz grid cell and cannot move an alignment decision.
+    Noted rather than guessed at silently.
+
+    This runs its own ULog() pass and drops it before returning, so the
+    FIFO buffers never coexist with the main parse's.
+    """
+    from pyulog import ULog
+
+    # Deferred: align imports this module, so a top-level import here
+    # would be circular. The 500 Hz cap lives in align because that is
+    # where spec 5.4 puts it; duplicating the float would risk drift.
+    from .align import HIGH_RATE_CAP_HZ
+
+    try:
+        ulog = ULog(path, message_name_filter_list=list(FIFO_TOPIC_KEYS),
+                    disable_str_exceptions=True)
+    except Exception:  # noqa: BLE001 -- absent/!unreadable FIFO is not fatal
+        return
+
+    for ds in ulog.data_list:
+        prefix = FIFO_TOPIC_KEYS.get(ds.name)
+        if prefix is None or "samples" not in ds.data:
+            continue
+        d = ds.data
+        counts = np.asarray(d["samples"], dtype=np.int32)
+        width = max((int(k[2:-1]) for k in d if k.startswith("x[")), default=-1) + 1
+        if width <= 0 or counts.size == 0:
+            continue
+        keep = int(counts.max())
+        if keep <= 0:
+            continue
+        keep = min(keep, width)
+
+        # (n_messages, keep) validity mask -- honours a per-message `samples`
+        # that is smaller than the array width, so padding slots never become
+        # fabricated readings.
+        valid = np.arange(keep, dtype=np.int32)[None, :] < counts[:, None]
+
+        # One timestamp grid shared by all three axes: the same ndarray object
+        # is handed to each Signal rather than copied three times.
+        base = np.asarray(d["timestamp_sample"] if "timestamp_sample" in d else d["timestamp"],
+                          dtype=np.int64)
+        dt_us = np.asarray(d["dt"], dtype=np.float64)
+        # int64 throughout: the float64 route allocated a (n, keep) float64
+        # AND its int64 cast AND the masked copy -- three full-size arrays for
+        # a quantity that is integer microseconds by construction.
+        dt_int = np.rint(dt_us).astype(np.int64)
+        grid = base[:, None] + np.arange(keep, dtype=np.int64)[None, :] * dt_int[:, None]
+        t_us = grid[valid]
+        del grid
+
+        # Decimate to the spec 5.4 high-rate cap. The FIFO runs at ~4 kHz;
+        # 5.4's high-rate spectral grid is min(native_real, native_sim)
+        # CAPPED AT 500 Hz, so everything above 500 Hz is discarded
+        # downstream regardless -- keeping it costs 8x the memory for data
+        # nothing reads. 500 Hz still leaves a 250 Hz Nyquist, covering
+        # 3.7's 20-100 Hz rotor band and most of the 100 Hz+ noise floor,
+        # and this is still PRE-IMU_ACCEL_CUTOFF data, which is the whole
+        # reason A5 wants the topic.
+        # ponytail: fixed decimation to 500 Hz; if a later pass needs the
+        # full 4 kHz band, take the factor from the caller instead.
+        native_hz = 1e6 / float(np.median(dt_us)) if np.median(dt_us) > 0 else 0.0
+        factor = int(native_hz // HIGH_RATE_CAP_HZ) if native_hz > HIGH_RATE_CAP_HZ else 1
+
+        scale = np.asarray(d["scale"], dtype=np.float32)
+        for axis in ("x", "y", "z"):
+            cols = [d.get(f"{axis}[{i}]") for i in range(keep)]
+            if any(c is None for c in cols):
+                continue
+            block = np.stack(cols, axis=1).astype(np.float32)
+            block *= scale[:, None]
+            key = f"{prefix}.{axis}"
+            values = block[valid]
+            del block
+            if factor > 1 and values.size > 27 * factor:
+                # zero_phase keeps the decimated series time-aligned with
+                # t_us[::factor]; a causal filter would introduce a group
+                # delay that alignment would later read as a real lag.
+                values = sp_signal.decimate(
+                    values, factor, ftype="fir", zero_phase=True).astype(np.float32)
+            axis_t = t_us[::factor][: values.size] if factor > 1 else t_us
+            if values.size:
+                # Deliberately bypasses _store: it upcasts to float64 and holds
+                # several full-length intermediates, which on a 1.05 M-sample
+                # signal is tens of MB of transient per axis. FIFO timestamps
+                # are monotonic by construction (base + i*dt), so the sort and
+                # dedupe _store exists for have nothing to do here.
+                finite = np.isfinite(values)
+                signals[key] = Signal(
+                    key=key,
+                    t_us=axis_t if finite.all() else axis_t[finite],
+                    values=values if finite.all() else values[finite],
+                    dropped_samples=int(values.size - int(finite.sum())),
+                )
+        if prefix not in "".join(warnings):
+            warnings.append(f"fifo_expanded:{ds.name}")
 
 
 def _normalise_actuator(raw: np.ndarray, pwm_min: float, pwm_max: float) -> np.ndarray:
@@ -489,8 +637,7 @@ def _normalise_actuator(raw: np.ndarray, pwm_min: float, pwm_max: float) -> np.n
     return (raw - pwm_min) / span
 
 
-def _ulog_meta(path, ulog, signals, params, pwm_range) -> LogMeta:
-    info = getattr(ulog, "msg_info_dict", {}) or {}
+def _ulog_meta(path, info, signals, params, pwm_range) -> LogMeta:
     start_utc = None
     # ULog's own start timestamp is a boot-relative microsecond counter, so
     # a UTC wall-clock time is only available if the log carries one -- do
@@ -534,6 +681,8 @@ def _ulog_meta(path, ulog, signals, params, pwm_range) -> LogMeta:
         looks_simulated=True if sim_evidence else None,
         sim_evidence=sim_evidence,
         actuator_pwm_range=pwm_range,
+        imu_accel_cutoff=params.get("IMU_ACCEL_CUTOFF"),
+        imu_gyro_cutoff=params.get("IMU_GYRO_CUTOFF"),
     )
 
 
