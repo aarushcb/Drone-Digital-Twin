@@ -44,6 +44,7 @@ from app.services.reality_gap.parsers import (  # noqa: E402
 )
 from app.services.reality_gap.align import (  # noqa: E402
     CANONICAL_RATE_HZ,
+    FINE_SEARCH_S,
     AlignmentError,
     airborne_window,
     align_logs,
@@ -444,6 +445,75 @@ def test_fine_alignment_recovers_known_shift():
           f"{abs(result.fine_shift_s):.3f}s (rho={result.fine_correlation:.3f})")
 
 
+def test_decimated_50hz_matches_full_rate_500hz_within_one_grid_sample():
+    """The fine aligner correlates on the 50 Hz canonical grid, not on a
+    native 500 Hz att.roll. That decimation is only legitimate if it
+    recovers the same lag: the 0.2-5 Hz band-pass means anything above
+    ~12.5 Hz is redundant for this measurement. Asserted against a
+    500 Hz reference of the same signal with a known injected shift."""
+    from app.services.reality_gap.align import (
+        _bandpass, _highest_variance_window, _normalised_cross_correlation,
+    )
+
+    known_shift_s = 0.614
+    for rate, win_s in ((500.0, 120.0), (CANONICAL_RATE_HZ, 120.0)):
+        n = int(rate * 300)
+        t = np.arange(n) / rate
+        mission = (0.30 * np.sin(2 * np.pi * 0.11 * t)
+                   + 0.10 * np.sin(2 * np.pi * 0.43 * t)
+                   + 0.05 * np.sin(2 * np.pi * 1.7 * t))
+        shifted = (0.30 * np.sin(2 * np.pi * 0.11 * (t - known_shift_s))
+                   + 0.10 * np.sin(2 * np.pi * 0.43 * (t - known_shift_s))
+                   + 0.05 * np.sin(2 * np.pi * 1.7 * (t - known_shift_s)))
+        a, b = _bandpass(mission, rate), _bandpass(shifted, rate)
+        w = _highest_variance_window(a, int(win_s * rate))
+        lag, rho = _normalised_cross_correlation(a[w], b[w], int(FINE_SEARCH_S * rate))
+        recovered = abs(lag / rate)
+        if rate == 500.0:
+            full_rate_shift = recovered
+        else:
+            grid = 1.0 / CANONICAL_RATE_HZ
+            assert abs(recovered - full_rate_shift) <= grid, (
+                f"50 Hz recovered {recovered:.4f}s vs 500 Hz {full_rate_shift:.4f}s "
+                f"-- differ by more than one {grid*1000:.0f} ms grid sample")
+            assert rho >= 0.5
+            print(f"PASS: 50 Hz recovered {recovered:.4f}s vs 500 Hz "
+                  f"{full_rate_shift:.4f}s (known {known_shift_s}s), "
+                  f"within one {grid*1000:.0f} ms grid sample")
+
+
+def test_variance_window_beats_from_the_start():
+    """A flight that is quiescent at the start and manoeuvres later: taking
+    the first N samples finds nothing to correlate, the variance-selected
+    window finds the manoeuvre."""
+    from app.services.reality_gap.align import (
+        _bandpass, _highest_variance_window, _normalised_cross_correlation,
+    )
+    rate, shift_s = CANONICAL_RATE_HZ, 0.60
+    n = int(rate * 400)
+    t = np.arange(n) / rate
+    active = (t > 250).astype(float)          # nothing happens for the first 250 s
+    m = active * (0.3 * np.sin(2 * np.pi * 0.11 * t) + 0.1 * np.sin(2 * np.pi * 0.43 * t))
+    a_full = _bandpass(m, rate)
+    active_s = (t > 250).astype(float)
+    ms = active_s * (0.3 * np.sin(2 * np.pi * 0.11 * (t - shift_s))
+                     + 0.1 * np.sin(2 * np.pi * 0.43 * (t - shift_s)))
+    b_full = _bandpass(ms, rate)
+
+    win = int(120.0 * rate)
+    _, rho_start = _normalised_cross_correlation(
+        a_full[:win], b_full[:win], int(FINE_SEARCH_S * rate))
+    w = _highest_variance_window(a_full, win)
+    lag_var, rho_var = _normalised_cross_correlation(
+        a_full[w], b_full[w], int(FINE_SEARCH_S * rate))
+
+    assert rho_var > rho_start, f"variance window rho={rho_var} not better than start rho={rho_start}"
+    assert rho_var >= 0.5, f"variance window still below the gate: {rho_var}"
+    assert abs(abs(lag_var / rate) - shift_s) <= 1.0 / rate
+    print(f"PASS: variance window rho={rho_var:.3f} vs from-the-start rho={rho_start:.3f}; "
+          f"recovered {abs(lag_var/rate):.2f}s")
+
+
 def test_unrelated_flights_fall_back_to_coarse_only():
     """Spec 5.3 [DECISION] fine-alignment gate -- 'the single most
     important honesty guard in the module'. Two unrelated missions must
@@ -712,6 +782,8 @@ ALL_TESTS = [
     test_dataflash_degrees_converted_to_radians,
     test_hdop_is_not_conflated_with_eph,
     test_fine_alignment_recovers_known_shift,
+    test_decimated_50hz_matches_full_rate_500hz_within_one_grid_sample,
+    test_variance_window_beats_from_the_start,
     test_unrelated_flights_fall_back_to_coarse_only,
     test_insufficient_overlap_raises,
     test_takeoff_anchor_detected,
