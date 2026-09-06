@@ -218,24 +218,31 @@ def _clean_series(
     if t_us.size == 0:
         return t_us, values, 0
 
-    finite = np.isfinite(values) & np.isfinite(t_us.astype(np.float64))
-    dropped = int((~finite).sum())
+    # t_us is int64 -- integers are always finite, so the old
+    # `np.isfinite(t_us.astype(np.float64))` allocated a full-length float64
+    # copy of every timestamp to prove something the dtype already guarantees.
+    finite = np.isfinite(values)
+    dropped = int(finite.size - int(finite.sum()))
     if dropped:
+        if dropped > 0.05 * finite.size:
+            warnings.append(f"high_dropped_sample_rate:{key}")
         t_us = t_us[finite]
         values = values[finite]
-        if dropped > 0.05 * (dropped + t_us.size):
-            warnings.append(f"high_dropped_sample_rate:{key}")
-    if t_us.size == 0:
+    if t_us.size < 2:
         return t_us, values, dropped
 
-    order = np.argsort(t_us, kind="stable")
-    t_us = t_us[order]
-    values = values[order]
-
-    keep = np.ones(t_us.size, dtype=bool)
-    keep[1:] = np.diff(t_us) != 0
-    t_us = t_us[keep]
-    values = values[keep]
+    # Log timestamps are already strictly increasing in the overwhelming
+    # majority of cases. Checking first costs one np.diff; sorting
+    # unconditionally cost an argsort plus four full-length gather copies
+    # every time, for nothing.
+    if not bool((np.diff(t_us) > 0).all()):
+        order = np.argsort(t_us, kind="stable")
+        t_us = t_us[order]
+        values = values[order]
+        keep = np.ones(t_us.size, dtype=bool)
+        keep[1:] = np.diff(t_us) != 0
+        t_us = t_us[keep]
+        values = values[keep]
 
     # Post-sort, post-dedupe the series is strictly increasing by
     # construction. The backwards-jump check of case 13 therefore has to
@@ -312,7 +319,10 @@ def _store(
         return
     size = min(t_us.size, values.size)
     t_us = np.asarray(t_us[:size], dtype=np.int64)
-    values = np.asarray(values[:size], dtype=np.float64)
+    # float32 AT EXTRACTION, not after cleaning. Signal has always stored
+    # float32 (spec 5.7); casting up to float64 here and back down at the end
+    # doubled every intermediate for no precision gain -- PX4 logs float32.
+    values = np.asarray(values[:size], dtype=np.float32)
 
     jump_idx = _detect_clock_jump(t_us)
     if jump_idx is not None:
@@ -327,9 +337,7 @@ def _store(
     t_us, values, dropped = _clean_series(t_us, values, warnings, key)
     if t_us.size == 0:
         return
-    signals[key] = Signal(
-        key=key, t_us=t_us, values=values.astype(np.float32), dropped_samples=dropped
-    )
+    signals[key] = Signal(key=key, t_us=t_us, values=values, dropped_samples=dropped)
 
 
 # ---------------------------------------------------------------------------
