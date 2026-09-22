@@ -221,6 +221,122 @@ def test_actuator_outputs_normalised_to_unit_range():
     print(f"PASS: actuator PWM 1300-1700us normalised to {out0.min():.3f}-{out0.max():.3f}")
 
 
+def _build_ulog_with_n_motors(path, n_motors, *, with_rotor_count_param):
+    """
+    A minimal, real ULog (round-tripped through pyulog's own writer, same
+    convention as make_fixtures.py) whose actuator_outputs message has
+    the FIXED 16-slot struct PX4 actually logs -- motors 0..n_motors-1
+    carry a real PWM signal, the rest sit at exactly 0.0, matching what
+    was verified on the real reference fixture (px4_641d242a.ulg).
+
+    `with_rotor_count_param` toggles whether CA_ROTOR_COUNT is present,
+    so both count sources (parameter vs. nonzero-heuristic fallback) get
+    a real fixture to run against, not just a mocked dict.
+    """
+    from pyulog import ULog
+
+    n = 2000
+    t_us = (np.arange(n, dtype=np.float64) * 20000).astype(np.uint64)  # 50 Hz
+
+    ulog = ULog(None)
+    ulog._file_version = 1
+    ulog._start_timestamp = 0
+    ulog._msg_info_dict = {"ver_sw": "v1.14.0-synthetic"}
+    ulog._msg_info_dict_types = {"ver_sw": "char[16]"}
+    params = {"SYS_AUTOSTART": 4001.0, "PWM_MAIN_MIN": 1000.0, "PWM_MAIN_MAX": 2000.0}
+    if with_rotor_count_param:
+        params["CA_ROTOR_COUNT"] = float(n_motors)
+    ulog._initial_parameters = params
+
+    fields = [("uint64_t", "timestamp")] + [("float", f"output[{i}]") for i in range(16)]
+    data = {"timestamp": t_us}
+    for i in range(16):
+        if i < n_motors:
+            # A real, distinct PWM trace per motor -- never exactly 0.0,
+            # which is what distinguishes a driven motor from padding.
+            data[f"output[{i}]"] = (1500.0 + 50.0 * (i + 1)
+                                    + 20.0 * np.sin(np.arange(n) / 30.0)).astype(np.float32)
+        else:
+            data[f"output[{i}]"] = np.zeros(n, dtype=np.float32)  # unused struct slot
+
+    ulog._message_formats["actuator_outputs"] = make_fixtures._message_format(
+        "actuator_outputs", fields)
+    ulog._data_list = [make_fixtures._dataset(0, "actuator_outputs", fields, data)]
+    ulog.write_ulog(path)
+
+
+def test_hexarotor_actuator_outputs_all_captured_and_warned():
+    """The bug: parsers.py hardcoded range(4) for actuator_outputs, so a
+    hexarotor's motors 5 and 6 vanished with no trace. Spec 5.2's own
+    canonical schema caps act.out at [0..3] (also baked into 4.2's
+    subsystem grouping and 4.3's coverage count), so this fix does NOT
+    widen the schema -- that needs a spec amendment, which is Cowork's to
+    write. What it fixes: the truncation is now a structured, parseable
+    warning instead of a silent data loss with no trace at all."""
+    path = os.path.join(FIXTURES, "hexarotor_6motor.ulg")
+    _build_ulog_with_n_motors(path, 6, with_rotor_count_param=True)
+    try:
+        parsed = parse_log(path)
+        # Schema-compliant: exactly act.out0-3 are captured, same as a quad.
+        captured = sorted(k for k in parsed.signals if k.startswith("act.out"))
+        assert captured == ["act.out0", "act.out1", "act.out2", "act.out3"], captured
+        # But the loss is now VISIBLE, structured, and counts correctly.
+        matches = [w for w in parsed.warnings if w.startswith("actuator_outputs_truncated:")]
+        assert len(matches) == 1, parsed.warnings
+        warning = matches[0]
+        assert "total=6" in warning
+        assert "captured=4" in warning
+        assert "missing=2" in warning
+        assert "source=CA_ROTOR_COUNT" in warning
+        print(f"PASS: 6-motor log -> act.out0-3 captured (schema-compliant), "
+              f"warning '{warning}' makes motors 5-6 visible instead of silent")
+    finally:
+        os.remove(path)
+
+
+def test_hexarotor_without_rotor_count_param_uses_nonzero_heuristic():
+    """Older firmware has no CA_ROTOR_COUNT. The fallback must still catch
+    the truncation, distinguishing a real (always-nonzero) PWM trace from
+    the always-exactly-0.0 padding in the unused struct slots -- verified
+    against the real reference log's own padding behaviour."""
+    path = os.path.join(FIXTURES, "hexarotor_6motor_noparam.ulg")
+    _build_ulog_with_n_motors(path, 6, with_rotor_count_param=False)
+    try:
+        parsed = parse_log(path)
+        matches = [w for w in parsed.warnings if w.startswith("actuator_outputs_truncated:")]
+        assert len(matches) == 1, parsed.warnings
+        assert "total=6" in matches[0]
+        assert "source=nonzero_output_heuristic" in matches[0]
+        print(f"PASS: no CA_ROTOR_COUNT -> nonzero-value fallback still finds 6 motors "
+              f"('{matches[0]}')")
+    finally:
+        os.remove(path)
+
+
+def test_quadrotor_actuator_outputs_no_false_positive_warning():
+    """The other half of the correctness bar: a real quadrotor (4 driven
+    outputs, 12 padding slots at 0.0) must NOT get a spurious truncation
+    warning. Regression-checked directly against the real fixture too
+    (px4_641d242a.ulg, CA_ROTOR_COUNT=4) in the assertions below."""
+    path = os.path.join(FIXTURES, "quadrotor_4motor.ulg")
+    _build_ulog_with_n_motors(path, 4, with_rotor_count_param=True)
+    try:
+        parsed = parse_log(path)
+        assert not any(w.startswith("actuator_outputs_truncated:") for w in parsed.warnings)
+    finally:
+        os.remove(path)
+
+    real = parse_log(REAL_ULG_REAL_FIXTURE := os.path.join(
+        os.path.dirname(FIXTURES), "reality_gap", "real", "px4_641d242a.ulg"))
+    if os.path.exists(REAL_ULG_REAL_FIXTURE):
+        assert not any(w.startswith("actuator_outputs_truncated:") for w in real.warnings)
+        print("PASS: 4-motor synthetic AND the real px4_641d242a.ulg quadrotor "
+              "both produce zero false-positive truncation warnings")
+    else:
+        print("PASS: 4-motor synthetic produces zero false-positive truncation warning "
+              "(real fixture not present in this checkout, skipped)")
+
+
 def test_alt_rel_is_negated_ned_z():
     """Spec 5.2: alt.rel = vehicle_local_position.z * -1, because NED z is
     positive-DOWN. A sign error here would invert every altitude in the
@@ -769,6 +885,9 @@ ALL_TESTS = [
     test_yaw_is_unwrapped,
     test_unwrap_yaw_on_synthetic_sweep,
     test_actuator_outputs_normalised_to_unit_range,
+    test_hexarotor_actuator_outputs_all_captured_and_warned,
+    test_hexarotor_without_rotor_count_param_uses_nonzero_heuristic,
+    test_quadrotor_actuator_outputs_no_false_positive_warning,
     test_alt_rel_is_negated_ned_z,
     test_native_rates_detected,
     test_simulator_provenance_detection,
@@ -803,6 +922,426 @@ ALL_TESTS = [
     test_cross_format_comparison_works,
 ]
 
+
+
+# ===========================================================================
+# PASS 2A -- metrics (spec 3.1-3.9) and spectral (3.7-3.8), per spec 10.1
+# ===========================================================================
+
+from app.services.reality_gap.metrics import (  # noqa: E402
+    compare_signal, effective_sample_size, freedman_diaconis_edges,
+    kl_divergence_bits, resource_panel, _smoothed_histograms,
+)
+from app.services.reality_gap.spectral import (  # noqa: E402
+    ACCEL_CHAIN, BANDS, actuator_lag, band_ratios_db, compare_spectra,
+    estimate_lag_s, welch_nperseg, welch_psd,
+)
+from scipy import stats as _sp_stats  # noqa: E402
+
+
+def _mission_signal(n=6000, seed=11, fs=50.0):
+    t = np.arange(n) / fs
+    rng = np.random.default_rng(seed)
+    return (0.3 * np.sin(2 * np.pi * 0.11 * t) + 0.1 * np.sin(2 * np.pi * 0.43 * t)
+            + rng.standard_normal(n) * 0.01)
+
+
+# --- 10.1 item 1: synthetic identity -------------------------------------
+
+def test_metrics_identity_is_exactly_zero():
+    """Spec 10.1 item 1, tolerance 1e-9. Identical inputs must give
+    NRMSE=0, VR=1, KL=0, KS=0, W1=0 -- not 'small', zero."""
+    x = _mission_signal()
+    r = compare_signal(x, x)
+    assert abs(r["nrmse_range"]) < 1e-9, r["nrmse_range"]
+    assert abs(r["nrmse_sigma"]) < 1e-9
+    assert abs(r["bias"]) < 1e-9
+    assert abs(r["vr"] - 1.0) < 1e-9, r["vr"]
+    assert abs(r["vr_log"]) < 1e-9
+    assert abs(r["kl_bits_real_vs_sim"]) < 1e-9, r["kl_bits_real_vs_sim"]
+    assert abs(r["jsd_bits"]) < 1e-9
+    assert abs(r["psi"]) < 1e-9
+    assert abs(r["wasserstein"]) < 1e-9
+    assert abs(r["ks_statistic"]) < 1e-9
+    assert abs(r["pearson_r"] - 1.0) < 1e-9
+    print("PASS: identity -> NRMSE/KL/JSD/PSI/W1/KS all 0, VR 1, rho 1 (<1e-9)")
+
+
+def test_spectral_identity_lsd_is_zero():
+    """Spec 10.1 item 1 also requires LSD = 0 on identical inputs."""
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal(20000)
+    s = compare_spectra(x, x, 1000.0)
+    assert abs(s["lsd_db"]) < 1e-9, s["lsd_db"]
+    assert abs(s["centroid_shift_hz"]) < 1e-9
+    for band, ratio in s["band_ratios_db"].items():
+        if ratio is not None:
+            assert abs(ratio) < 1e-9, f"{band} ratio {ratio}"
+    print("PASS: identity -> LSD 0 dB, centroid shift 0 Hz, every band ratio 0 dB")
+
+
+def test_lag_identity_is_zero():
+    """Spec 10.1 item 1: all lags 0 when the two logs are identical."""
+    # The response must actually correlate with the command. An earlier
+    # version used np.gradient(x), which is 90 degrees out of phase --
+    # rho 0.248, and the 3.8 validity gate correctly refused it. That was
+    # the test being wrong, not the gate.
+    x = _mission_signal(n=4000)
+    delayed = np.concatenate([np.zeros(4), x[:-4]])  # same 80 ms lag both sides
+    lag = actuator_lag(x, delayed, x, delayed, 50.0, pair_name="identity")
+    assert lag["delta_tau_ms"] == 0.0, lag
+    assert lag["tau_real_ms"] == lag["tau_sim_ms"] != 0.0, lag
+    print(f"PASS: same lag both sides -> delta_tau 0.0 ms "
+          f"(tau {lag['tau_real_ms']} ms each, rho {lag['rho_real']:.3f})")
+
+
+# --- 10.1 item 2: known offset -------------------------------------------
+
+def test_known_offset_recovers_bias_exactly():
+    """Spec 10.1 item 2: sim = real + 0.5 -> bias exactly 0.5, VR 1, rho 1,
+    and KS equal to scipy's on the same arrays."""
+    x = _mission_signal()
+    y = x + 0.5
+    r = compare_signal(x, y)
+    assert abs(r["bias"] - 0.5) < 1e-9, r["bias"]
+    assert abs(r["vr"] - 1.0) < 1e-9
+    assert abs(r["pearson_r"] - 1.0) < 1e-9
+    ref = _sp_stats.ks_2samp(x, y)
+    assert r["ks_statistic"] == float(ref.statistic)
+    print(f"PASS: +0.5 offset -> bias {r['bias']:.10f}, VR {r['vr']:.10f}, "
+          f"rho {r['pearson_r']:.10f}, KS {r['ks_statistic']:.6f}")
+
+
+# --- 10.1 item 3: known variance ratio -----------------------------------
+
+def test_known_variance_ratio():
+    """Spec 10.1 item 3: sim = real scaled x2 about its mean -> VR = 4.0,
+    VR_log = 2.0, to 1e-9."""
+    x = _mission_signal()
+    y = (x - x.mean()) * 2.0 + x.mean()
+    r = compare_signal(x, y)
+    assert abs(r["vr"] - 4.0) < 1e-9, r["vr"]
+    assert abs(r["vr_log"] - 2.0) < 1e-9, r["vr_log"]
+    print(f"PASS: x2 amplitude -> VR {r['vr']:.10f}, VR_log {r['vr_log']:.10f}")
+
+
+# --- 10.1 item 4: known lag ----------------------------------------------
+
+def test_known_lag_60ms_on_200hz_chirp():
+    """Spec 10.1 item 4: 60 ms delay on a 200 Hz chirp, recovered within
+    +/-2 ms after parabolic refinement. 60 ms is 12 samples at 200 Hz, so
+    an integer-only peak would pass -- the sub-sample case is covered by
+    the 63 ms variant below, which is 12.6 samples."""
+    fs, delay_s = 200.0, 0.060
+    n = 8000
+    t = np.arange(n) / fs
+    cmd = sp_chirp = np.sin(2 * np.pi * (1.0 + 3.0 * t / t[-1]) * t)
+    shift = int(round(delay_s * fs))
+    resp = np.concatenate([np.zeros(shift), cmd[:-shift]])
+    lag, rho = estimate_lag_s(cmd, resp, fs)
+    err_ms = abs(lag * 1000.0 - 60.0)
+    assert err_ms <= 2.0, f"recovered {lag*1000:.2f} ms, error {err_ms:.2f} ms"
+    assert rho > 0.9
+    print(f"PASS: 60 ms injected lag recovered as {lag*1000:.2f} ms "
+          f"(err {err_ms:.2f} ms, rho {rho:.3f})")
+
+
+def test_sub_sample_lag_needs_parabolic_refinement():
+    """63 ms at 200 Hz is 12.6 samples -- not representable on the integer
+    grid. This is the case parabolic refinement exists for, and it fails
+    without it (nearest sample is 12 or 13 -> 60 or 65 ms, both >2 ms out)."""
+    fs = 200.0
+    n = 8000
+    t = np.arange(n) / fs
+    cmd = np.sin(2 * np.pi * 1.7 * t) + 0.5 * np.sin(2 * np.pi * 0.6 * t)
+    # fractional delay via interpolation
+    resp = np.interp(t - 0.063, t, cmd, left=0.0, right=0.0)
+    lag, rho = estimate_lag_s(cmd, resp, fs)
+    err_ms = abs(lag * 1000.0 - 63.0)
+    assert err_ms <= 2.0, f"recovered {lag*1000:.2f} ms, error {err_ms:.2f} ms"
+    print(f"PASS: 63 ms (12.6 samples) recovered as {lag*1000:.2f} ms, "
+          f"err {err_ms:.2f} ms -- integer grid could not do this")
+
+
+def test_lag_validity_gate_refuses_uncorrelated_pair():
+    """Spec 3.8 [DECISION]: peak rho < 0.3 -> lag_unreliable, no number."""
+    rng = np.random.default_rng(5)
+    a, b = rng.standard_normal(4000), rng.standard_normal(4000)
+    out = actuator_lag(a, b, a, b, 50.0, pair_name="noise")
+    assert out["delta_tau_ms"] is None
+    assert "lag_unreliable" in out["flags"]
+    assert out["nulls"]["delta_tau_ms"] == "lag_unreliable"
+    print(f"PASS: uncorrelated pair -> lag_unreliable, no number "
+          f"(rho {out['rho_real']:.3f} < 0.3)")
+
+
+# --- 10.1 item 5: known spectrum -----------------------------------------
+
+def test_known_spectrum_rotor_band_recovers_injected_tone():
+    """Spec 10.1 item 5: white noise vs white noise + a 40 Hz tone ->
+    rotor-band (20-100 Hz) ratio recovers the injected tone power to
+    within 1 dB."""
+    fs, n = 1000.0, 200000
+    rng = np.random.default_rng(7)
+    t = np.arange(n) / fs
+    noise = rng.standard_normal(n)
+    amp = 0.5
+    tone = amp * np.sin(2 * np.pi * 40.0 * t)
+    real = noise
+    sim = noise + tone
+
+    f, p_r = welch_psd(real, fs)
+    _, p_s = welch_psd(sim, fs)
+    from app.services.reality_gap.spectral import band_power
+    pr = band_power(f, p_r, 20.0, 100.0)
+    ps = band_power(f, p_s, 20.0, 100.0)
+    # Analytic: the tone adds amp^2/2 of power on top of the band's noise.
+    expected_db = 10 * np.log10((pr + amp ** 2 / 2) / pr)
+    ratios, nulls, _ = band_ratios_db(f, p_r, p_s, fs)
+    err = abs(ratios["rotor"] - expected_db)
+    assert err <= 1.0, f"measured {ratios['rotor']:.2f} dB vs expected {expected_db:.2f} dB"
+    print(f"PASS: 40 Hz tone -> rotor band {ratios['rotor']:.2f} dB vs analytic "
+          f"{expected_db:.2f} dB (err {err:.2f} dB)")
+
+
+# --- 10.1 item 6: KL against a closed form -------------------------------
+
+def test_kl_matches_gaussian_closed_form():
+    """Spec 10.1 item 6 -- 'the test that proves the binning and smoothing
+    are not silently distorting the number'. Two Gaussians, N=1e6, binned
+    per 3.0, within 2% of the analytic KL converted to bits."""
+    rng = np.random.default_rng(13)
+    mu_p, sd_p = 0.0, 1.0
+    mu_q, sd_q = 0.4, 1.3
+    n = 1_000_000
+    p_samples = rng.normal(mu_p, sd_p, n)
+    q_samples = rng.normal(mu_q, sd_q, n)
+
+    analytic_nats = (np.log(sd_q / sd_p)
+                     + (sd_p ** 2 + (mu_p - mu_q) ** 2) / (2 * sd_q ** 2) - 0.5)
+    analytic_bits = analytic_nats / np.log(2.0)
+
+    edges, reason = freedman_diaconis_edges(np.concatenate([p_samples, q_samples]))
+    assert edges is not None, reason
+    P, Q = _smoothed_histograms(p_samples, q_samples, edges)
+    measured = kl_divergence_bits(P, Q)
+    rel = abs(measured - analytic_bits) / analytic_bits
+    assert rel <= 0.02, f"measured {measured:.6f} bits vs analytic {analytic_bits:.6f} ({rel*100:.2f}%)"
+    print(f"PASS: KL {measured:.6f} bits vs closed form {analytic_bits:.6f} bits "
+          f"({rel*100:.2f}% < 2%), {edges.size-1} FD bins")
+
+
+# --- 10.1 item 7: KS and Wasserstein match scipy exactly -----------------
+
+def test_ks_and_wasserstein_match_scipy_exactly():
+    """Spec 10.1 item 7, unchanged by A7: we call scipy, so the value must
+    be scipy's, bit for bit. Guards argument-order and axis mistakes."""
+    rng = np.random.default_rng(17)
+    a = rng.normal(0, 1, 20000)
+    b = rng.normal(0.3, 1.2, 20000)
+    r = compare_signal(a, b)
+    ks_ref = _sp_stats.ks_2samp(a, b)
+    w_ref = _sp_stats.wasserstein_distance(a, b)
+    assert r["ks_statistic"] == float(ks_ref.statistic), (r["ks_statistic"], ks_ref.statistic)
+    assert r["ks_pvalue"] == float(ks_ref.pvalue)
+    assert r["wasserstein"] == float(w_ref), (r["wasserstein"], w_ref)
+    print(f"PASS: KS {r['ks_statistic']:.12f} and W1 {r['wasserstein']:.12f} "
+          f"are scipy's values exactly (==, not approx)")
+
+
+def test_kl_direction_is_real_vs_sim_and_asymmetric():
+    """Spec 3.3 [DECISION]: P=real, Q=sim. Asymmetry proves the direction
+    is actually honoured rather than the arguments being interchangeable."""
+    rng = np.random.default_rng(19)
+    a = rng.normal(0, 1, 50000)
+    b = rng.normal(0.8, 2.0, 50000)
+    edges, _ = freedman_diaconis_edges(np.concatenate([a, b]))
+    P, Q = _smoothed_histograms(a, b, edges)
+    fwd, rev = kl_divergence_bits(P, Q), kl_divergence_bits(Q, P)
+    assert abs(fwd - rev) > 1e-3, (fwd, rev)
+    assert compare_signal(a, b)["kl_bits_real_vs_sim"] == fwd
+    print(f"PASS: KL(real||sim) {fwd:.4f} != KL(sim||real) {rev:.4f} bits; "
+          f"compare_signal reports the real||sim direction")
+
+
+# --- null-with-reason behaviour (spec 9, 10.6 item 29) -------------------
+
+def test_degenerate_signal_nulls_not_zeros():
+    """Spec 9 case 10: a stuck sensor nulls VR/KL/PSI/KS/W1 with reasons.
+    Never 0.0 -- a fabricated zero reads as perfect agreement."""
+    x = _mission_signal()
+    stuck = np.full(x.size, 3.0)
+    r = compare_signal(x, stuck)
+    for key in ("vr", "kl_bits_real_vs_sim", "psi", "ks_statistic", "wasserstein"):
+        assert r[key] is None, f"{key} should be null, got {r[key]}"
+        assert key in r["nulls"], f"{key} null without a reason"
+    assert "degenerate" in r["flags"]
+    # The real side still has variance, so the sigma fallback survives.
+    assert r["nrmse_sigma"] is not None
+    print(f"PASS: stuck sim sensor -> VR/KL/PSI/KS/W1 null with reasons "
+          f"{sorted(set(r['nulls'].values()))}, NRMSE_sigma still computed")
+
+
+def test_constant_real_promotes_sigma_and_then_nulls_it():
+    """Spec 3.1 [DECISION] + 9 case 10: range(real) below floor nulls
+    NRMSE_range; a degenerate REAL side also kills the sigma fallback."""
+    const = np.full(3000, 2.0)
+    r = compare_signal(const, const + 0.1)
+    assert r["nrmse_range"] is None and r["nulls"]["nrmse_range"] == "range_below_floor"
+    assert r["nrmse_sigma"] is None and r["nulls"]["nrmse_sigma"] == "real_variance_degenerate"
+    assert r["nrmse_primary"] == "nrmse_sigma"
+    print("PASS: constant real -> nrmse_range null (range_below_floor), "
+          "nrmse_sigma null (real_variance_degenerate), neither coerced to 0")
+
+
+def test_low_rate_signal_gets_no_spectral_metrics():
+    """Spec 9 case 5: below 5 Hz native -> all spectral metrics null."""
+    x = _mission_signal(n=200)
+    s = compare_spectra(x, x, 2.0, low_rate=True)
+    assert s["lsd_db"] is None and s["nulls"]["lsd_db"] == "low_rate"
+    assert all(v is None for v in s["band_ratios_db"].values())
+    print("PASS: low_rate signal -> every spectral metric null with reason low_rate")
+
+
+# --- A5 cutoff gate ------------------------------------------------------
+
+def test_band_nulled_above_antialiasing_cutoff():
+    """A5 / spec 3.7 item 2: a band whose LOWER edge sits above either
+    log's cutoff is null with band_above_antialiasing_cutoff -- the exact
+    real-hardware case, IMU_ACCEL_CUTOFF=30 Hz against a 20-100 Hz band's
+    upper reach and a 100 Hz+ noise floor."""
+    fs, n = 1000.0, 100000
+    rng = np.random.default_rng(23)
+    x = rng.standard_normal(n)
+    f, p = welch_psd(x, fs)
+    ratios, nulls, flags = band_ratios_db(f, p, p, fs, cutoff_real=30.0, cutoff_sim=30.0)
+    assert ratios["noise_floor"] is None
+    assert nulls["noise_floor"] == "band_above_antialiasing_cutoff"
+    # rotor (20-100) straddles 30 Hz -> computed, but flagged
+    assert ratios["rotor"] is not None
+    assert any(f_.startswith("band_partially_filtered:rotor") for f_ in flags), flags
+    print("PASS: 30 Hz cutoff -> noise_floor null (band_above_antialiasing_cutoff), "
+          "rotor computed + band_partially_filtered")
+
+
+def test_gate_below_band_lower_edge_nulls_rotor():
+    """Spec 10.1 item 9b(g): both logs at IMU_ACCEL_CUTOFF=15 (below the
+    rotor band's 20 Hz lower edge) -> rotor ratio null with reason."""
+    fs, n = 1000.0, 100000
+    rng = np.random.default_rng(29)
+    x = rng.standard_normal(n)
+    f, p = welch_psd(x, fs)
+    ratios, nulls, _ = band_ratios_db(f, p, p, fs, cutoff_real=15.0, cutoff_sim=15.0)
+    assert ratios["rotor"] is None
+    assert nulls["rotor"] == "band_above_antialiasing_cutoff"
+    print("PASS: 15 Hz cutoff (below 20 Hz edge) -> rotor null with "
+          "band_above_antialiasing_cutoff")
+
+
+def test_cutoff_mismatch_warns_but_still_computes():
+    """A5 item 3 / spec 10.1 item 9b(b,c): mismatched cutoffs mark every
+    spectral metric cutoff_mismatch, but the metrics are STILL computed --
+    suppression applies to the hint (spec 6), not to the measurement."""
+    fs, n = 1000.0, 100000
+    rng = np.random.default_rng(31)
+    x = rng.standard_normal(n)
+    s = compare_spectra(x, x, fs, chain=ACCEL_CHAIN, cutoff_real=30.0, cutoff_sim=100.0)
+    assert "cutoff_mismatch" in s["flags"]
+    assert s["lsd_db"] is not None, "metric must still be computed"
+    assert s["band_ratios_db"]["structural"] is not None
+    matched = compare_spectra(x, x, fs, cutoff_real=100.0, cutoff_sim=100.0)
+    assert "cutoff_mismatch" not in matched["flags"]
+    print("PASS: 30 vs 100 Hz -> cutoff_mismatch flag, metrics still computed; "
+          "matched 100/100 -> no flag")
+
+
+def test_cutoff_zero_means_filter_disabled():
+    """Spec 3.7 item 1: a cutoff of 0 in PX4 means DISABLED, not 0 Hz.
+    Reading it literally would null every band on the widest-bandwidth log."""
+    fs, n = 1000.0, 100000
+    rng = np.random.default_rng(37)
+    x = rng.standard_normal(n)
+    f, p = welch_psd(x, fs)
+    ratios, nulls, _ = band_ratios_db(f, p, p, fs, cutoff_real=0.0, cutoff_sim=0.0)
+    assert ratios["noise_floor"] is not None, nulls
+    assert ratios["rotor"] is not None
+    print("PASS: cutoff 0.0 treated as disabled -> all bands measurable")
+
+
+def test_bands_above_nyquist_are_null_on_the_50hz_grid():
+    """Spec 3.7 (b): at the 50 Hz canonical grid Nyquist is 25 Hz, so the
+    rotor and noise-floor bands are unavailable unless the 5.4 high-rate
+    path is used. Null, not zero."""
+    x = _mission_signal(n=20000)
+    s = compare_spectra(x, x, 50.0)
+    assert s["band_ratios_db"]["rotor"] is None
+    assert s["band_ratio_nulls"]["rotor"] == "band_above_nyquist"
+    assert s["band_ratios_db"]["noise_floor"] is None
+    assert s["band_ratios_db"]["structural"] is not None
+    print("PASS: 50 Hz grid -> rotor and noise_floor null (band_above_nyquist), "
+          "rigid_body and structural computed")
+
+
+# --- misc ----------------------------------------------------------------
+
+def test_effective_sample_size_below_nominal_for_correlated_series():
+    """Spec 3.6 [DECISION]: N_eff must shrink for autocorrelated data --
+    that is the whole point of reporting it next to the p-value."""
+    rng = np.random.default_rng(41)
+    white = rng.standard_normal(10000)
+    smooth = np.convolve(white, np.ones(50) / 50, mode="same")
+    n_white = effective_sample_size(white)
+    n_smooth = effective_sample_size(smooth)
+    assert n_smooth < n_white / 5, (n_smooth, n_white)
+    assert abs(n_white - 10000) < 10000 * 0.15
+    print(f"PASS: N_eff white {n_white:.0f}/10000, smoothed {n_smooth:.0f} "
+          f"({n_smooth/10000*100:.1f}% of nominal)")
+
+
+def test_welch_nperseg_shrinks_for_short_signals():
+    assert welch_nperseg(100000) == 1024
+    short = welch_nperseg(2000)
+    assert short <= 256 and (short & (short - 1)) == 0, short
+    print(f"PASS: nperseg 1024 for long signals, {short} (power of two) for a short one")
+
+
+def test_resource_panel_is_not_scored_and_nulls_absent_topics():
+    """Spec 3.9 [DECISION]: context panel, never folded into a score."""
+    panel = resource_panel(real_cpu=[0.4, 0.5, 0.9], sim_cpu=[0.1, 0.1, 0.2])
+    assert panel["scored"] is False
+    assert abs(panel["cpu_real_mean"] - 0.6) < 1e-9
+    assert panel["mem_real_mean"] is None
+    assert panel["nulls"]["mem_real_mean"] == "topic_absent"
+    print(f"PASS: resource panel scored=False, cpu_real p95 "
+          f"{panel['cpu_real_p95']:.2f}, absent topics null with reason")
+
+
+PASS2A_TESTS = [
+    test_metrics_identity_is_exactly_zero,
+    test_spectral_identity_lsd_is_zero,
+    test_lag_identity_is_zero,
+    test_known_offset_recovers_bias_exactly,
+    test_known_variance_ratio,
+    test_known_lag_60ms_on_200hz_chirp,
+    test_sub_sample_lag_needs_parabolic_refinement,
+    test_lag_validity_gate_refuses_uncorrelated_pair,
+    test_known_spectrum_rotor_band_recovers_injected_tone,
+    test_kl_matches_gaussian_closed_form,
+    test_ks_and_wasserstein_match_scipy_exactly,
+    test_kl_direction_is_real_vs_sim_and_asymmetric,
+    test_degenerate_signal_nulls_not_zeros,
+    test_constant_real_promotes_sigma_and_then_nulls_it,
+    test_low_rate_signal_gets_no_spectral_metrics,
+    test_band_nulled_above_antialiasing_cutoff,
+    test_gate_below_band_lower_edge_nulls_rotor,
+    test_cutoff_mismatch_warns_but_still_computes,
+    test_cutoff_zero_means_filter_disabled,
+    test_bands_above_nyquist_are_null_on_the_50hz_grid,
+    test_effective_sample_size_below_nominal_for_correlated_series,
+    test_welch_nperseg_shrinks_for_short_signals,
+    test_resource_panel_is_not_scored_and_nulls_absent_topics,
+]
+ALL_TESTS.extend(PASS2A_TESTS)
 
 if __name__ == "__main__":
     _require_fixtures()

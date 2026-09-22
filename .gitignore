@@ -19,3 +19,15 @@ venv/
 # is "no generated fixtures in git", the .bin files should be ignored
 # too; left as-is rather than silently widening the rule.
 tests/fixtures/reality_gap/*.ulg
+
+# D1 real-hardware reference logs -- downloaded, never committed.
+# Note the rule above uses a single '*', which does NOT cross a directory
+# separator, so it does not cover this subdirectory. Hence the separate rule.
+#
+# These are third-party flight logs from PX4 Flight Review, published under
+# CC-BY (PX4). Two reasons they stay out of git: they are large (tens to
+# hundreds of MB), and redistributing someone else's logs inside this repo is
+# a licence question we have not answered -- attribution in a report is not
+# the same as vendoring the file. Each log's provenance belongs in
+# tests/fixtures/reality_gap/real/SOURCES.md (tracked), not in the blob.
+tests/fixtures/reality_gap/real/
