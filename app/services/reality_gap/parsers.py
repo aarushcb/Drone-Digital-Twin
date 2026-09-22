@@ -472,6 +472,13 @@ def parse_ulog(path: str) -> ParsedLog:
     params = {k: float(v) for k, v in ulog.initial_parameters.items() if isinstance(v, (int, float))}
 
     # --- actuator outputs, normalised to [0,1] per spec 5.2 [DECISION] ---
+    # spec 5.2's canonical schema is act.out[0..3] -- a fixed 4 channels,
+    # unchanged here. That is correct for a quadrotor and WRONG for a
+    # hex/octo, which silently loses motors 5+ with no trace. This does
+    # not widen the schema (that needs a spec amendment authorizing
+    # act.out[0..N] and updating 4.2/4.3's subsystem+coverage tables,
+    # which is Cowork's to write, not this pass's) -- it only makes the
+    # truncation VISIBLE via a structured warning instead of silent.
     pwm_min = float(params.get("PWM_MAIN_MIN", params.get("PWM_MIN", DEFAULT_PWM_MIN)))
     pwm_max = float(params.get("PWM_MAIN_MAX", params.get("PWM_MAX", DEFAULT_PWM_MAX)))
     act = datasets.get("actuator_outputs")
@@ -483,6 +490,12 @@ def parse_ulog(path: str) -> ParsedLog:
                 continue
             raw = np.asarray(act.data[fname], dtype=np.float64)
             _store(signals, warnings, f"act.out{i}", t, _normalise_actuator(raw, pwm_min, pwm_max))
+        n_actual, count_source = _actual_actuator_count_ulog(act.data, params)
+        if n_actual > 4:
+            warnings.append(
+                f"actuator_outputs_truncated:total={n_actual},captured=4,"
+                f"missing={n_actual - 4},source={count_source}"
+            )
 
     # Arming state -> status.armed, so align.find_arm_anchor's arm_event
     # branch is reachable on a real log. PX4 vehicle_status.arming_state:
@@ -643,6 +656,43 @@ def _normalise_actuator(raw: np.ndarray, pwm_min: float, pwm_max: float) -> np.n
     if span <= 0:
         return raw
     return (raw - pwm_min) / span
+
+
+def _actual_actuator_count_ulog(act_data: dict, params: dict) -> Tuple[int, str]:
+    """
+    Best-available REAL actuator/motor count for this log, read from the
+    vehicle's own config rather than assumed. Returns (count, source).
+
+    PX4's actuator_outputs message is a FIXED-WIDTH output[0..15] struct
+    regardless of airframe -- verified against the real reference fixture
+    (px4_641d242a.ulg): all 16 output[] fields are present even though
+    only 4 motors are driven, with outputs 4-15 sitting at exactly
+    min==max==0.0 (struct padding, not a logged value -- an idle-but-
+    connected motor reports a real PWM, never exactly 0.0). Field
+    PRESENCE is therefore useless as a motor-count signal for ULog.
+
+    CA_ROTOR_COUNT -- PX4's control-allocation rotor count parameter,
+    present on firmware built with the new control allocation module
+    (confirmed present and correct, value 4, on the same reference log)
+    -- is the authoritative source when available.
+
+    Fallback for older firmware without CA_ROTOR_COUNT: count outputs
+    that ever take a nonzero value, using the padding-vs-real distinction
+    above. This is a heuristic (an output idling exactly at 0 forever
+    would misclassify as unused), so it is reported as such via the
+    `source` string rather than silently presented with the same
+    confidence as a parameter read.
+    """
+    rotor_count = params.get("CA_ROTOR_COUNT")
+    if rotor_count is not None and rotor_count > 0:
+        return int(rotor_count), "CA_ROTOR_COUNT"
+
+    indices = sorted(
+        int(k[len("output["):-1]) for k in act_data
+        if k.startswith("output[") and k.endswith("]")
+    )
+    active = sum(1 for i in indices if np.any(np.asarray(act_data[f"output[{i}]"]) != 0))
+    return active, "nonzero_output_heuristic"
 
 
 def _ulog_meta(path, info, signals, params, pwm_range) -> LogMeta:
@@ -849,6 +899,26 @@ def parse_dataflash(path: str) -> ParsedLog:
                 continue
             raw = np.asarray(rcou[fname], dtype=np.float64)
             _store(signals, warnings, f"act.out{i}", t, _normalise_actuator(raw, pwm_min, pwm_max))
+        # Same truncation-visibility fix as the ULog path above: spec 5.2's
+        # schema is act.out[0..3], unchanged. Whether ArduPilot's RCOU
+        # message is fixed-width like PX4's actuator_outputs (padding, not
+        # absence, for unused channels) has not been verified against a
+        # real hex/octo DataFlash log -- no real one is available yet
+        # (see BACKLOG.md's "Blocked -- needs a real .ulg" section, which
+        # applies equally to a real ArduPilot .bin). The nonzero-value
+        # heuristic is used rather than field presence because it is
+        # correct under EITHER struct layout, whereas presence-counting
+        # would silently under-report if RCOU turns out to be fixed-width
+        # the same way actuator_outputs is.
+        rcou_indices = sorted(
+            int(k[1:]) for k in rcou if k != "_t" and k.startswith("C") and k[1:].isdigit()
+        )
+        n_actual = sum(1 for i in rcou_indices if np.any(np.asarray(rcou[f"C{i}"]) != 0))
+        if n_actual > 4:
+            warnings.append(
+                f"actuator_outputs_truncated:total={n_actual},captured=4,"
+                f"missing={n_actual - 4},source=nonzero_output_heuristic"
+            )
 
     if not signals:
         raise EmptyLogError(f"{os.path.basename(path)} contains no usable telemetry")
