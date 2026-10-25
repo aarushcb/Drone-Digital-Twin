@@ -338,11 +338,15 @@ class Finding:
     causes: List[dict]
     quarantined: bool = False
     basis: Optional[str] = None
+    cause_group: str = ""     # the §5.3 cause row: findings sharing one are one finding
+    related: List[dict] = field(default_factory=list)   # other features collapsed into this one
     sort_score: float = field(default=0.0, repr=False)
+    tier: str = field(default="R1", repr=False)
 
     def to_json(self) -> dict:
         d = dict(self.__dict__)
         d.pop("sort_score")
+        d.pop("tier")
         return d
 
 
@@ -367,7 +371,8 @@ def _make(fs: FeatureScore, kind: str, line: str, comparison: Optional[dict], co
         sort = min(sort, -1.0 + sort / 100.0)  # absolute bads always first
     return Finding(fs.key, fs.feature.subsystem, kind, line, text, figure(v, d), float(v), comparison, fs.mode,
                    fs.n, confidence, fs.score, causes, quarantined=fs.admitted is False and fs.quarantine_reason
-                   not in (None, "flight_not_qualified", "feature_invalid"), basis=fs.basis, sort_score=sort)
+                   not in (None, "flight_not_qualified", "feature_invalid"), basis=fs.basis,
+                   cause_group=_cause_key(fs), sort_score=sort, tier=fs.feature.tier)
 
 
 def finding_for(fs: FeatureScore) -> Optional[Finding]:
@@ -405,8 +410,28 @@ def finding_for(fs: FeatureScore) -> Optional[Finding]:
 
 
 def generate(scores: Sequence[FeatureScore]) -> List[Finding]:
+    """
+    One finding per probable cause, not per feature (spec §5.1 grouping
+    rule). Findings whose causes come from the same §5.3 row -- vibration
+    p50 and p95, the three tracking axes, the three GPS position figures --
+    describe one physical problem, so they collapse into one. Its line is
+    the most telling member: the worst score (absolute bads first), then
+    tier R1 before R2, then catalogue order. The rest stay attached as
+    `related`, figures intact. Different rows (motor spread vs hover
+    throttle, vibration level vs PX4's imbalance detector) stay separate.
+    """
     out = [f for f in (finding_for(fs) for fs in scores) if f is not None]
-    return sorted(out, key=lambda f: f.sort_score)
+    groups: Dict[str, List[Finding]] = {}
+    for i, f in enumerate(out):
+        groups.setdefault(f.cause_group, []).append(f)
+    collapsed = []
+    for members in groups.values():
+        ranked = sorted(members, key=lambda f: (f.sort_score, f.tier != "R1", out.index(f)))
+        lead = ranked[0]
+        lead.related = [{"key": f.key, "figure": f.figure, "value": f.value, "score": f.score, "line": f.line,
+                         "kind": f.kind, "comparison": f.comparison} for f in ranked[1:]]
+        collapsed.append(lead)
+    return sorted(collapsed, key=lambda f: f.sort_score)
 
 
 # ---------------------------------------------------------------- verdict
@@ -420,9 +445,11 @@ def verdict(findings: Sequence[Finding], checks: Optional[List[dict]], n_epoch: 
         counted = [c for c in checks if c["status"] != "unavailable"]
         failed = [c for c in counted if c["status"] not in ("ok", "usage_note")]
         k, m = len(counted) - len(failed), len(counted)
-        head = (f"First flight logged: {k} of {m} checks OK" if not failed and n_epoch == 1 else
-                f"First flight logged: {k} OK, {len(failed)} to look at" if n_epoch == 1 else
-                f"{k} of {m} checks OK" if not failed else f"{k} OK, {len(failed)} to look at")
+        # "to look at" counts causes (collapsed findings), not failed checks:
+        # two GPS checks failing are one thing to look at (spec §5.1).
+        j = max(len(findings), 1) if failed else 0
+        prefix = "First flight logged: " if n_epoch == 1 else ""
+        head = prefix + (f"{k} of {m} checks OK" + (f", {j} to look at" if failed else ""))
         guide = "PX4's" if autopilot == "px4" else "ArduPilot's"
         lines = [findings[0].text if findings else f"Nothing outside {guide} published ranges."]
         lines.append(f"Fly {max(0, 5 - n_epoch)} more to learn your drone's normal.")

@@ -12,7 +12,8 @@ deviates from them.
   reference baseline  median and MAD over the first REFERENCE_FLIGHTS admitted
                       values, then frozen -- catches slow drift
 
-Deviation is the robust z, z = (x - median) / max(1.4826 * MAD, floor),
+Deviation is the robust z, z = (x - median) / max(1.4826 * MAD, floor), where
+floor = max(absolute floor, relative floor x |median|),
 made one-sided where only one direction is bad.
 """
 
@@ -64,6 +65,19 @@ SIGMA_FLOOR: Dict[str, float] = {
     "gps.nsats_p10": 1.0, "gps.sacc_p50": 0.05,        # count, m/s (not in spec table)
     "gps.noise": 5.0, "gps.jamming": 5.0,              # receiver units (not in spec table)
 }
+
+# Relative floor: spread is at least this fraction of the baseline median.
+# Added for the vibration metric after the flight-5 sample scored a 29% p95
+# rise at 17.3: MAD was 0.18 m/s^2, so the absolute 0.5 floor set the spread,
+# and 0.5 is 9% of a 5.4 p50 median but only 4.4% of an 11.3 p95 median --
+# p95 was judged twice as strictly, and ArduPilot's VIBE (typically 10-30)
+# would be judged far more strictly still. A relative floor scales with the
+# drone and the autopilot. TODO(calibrate): 10% is judgement. The one real
+# log shows chunk-to-chunk p95 spread of 3-11% and p50 of 27-46% within a
+# single flight (driven by hover vs manoeuvring), which bounds nothing about
+# whole-flight scatter; set it from the flight-to-flight MAD/median of healthy
+# drones once >= 10 drones have >= 10 flights.
+RELATIVE_FLOOR: Dict[str, float] = {"vib.metric_p50": 0.10, "vib.metric_p95": 0.10}
 
 # Which direction of change is harmful, per scored feature (spec §2.1).
 DIRECTION: Dict[str, str] = {
@@ -121,7 +135,7 @@ class Baseline:
     kind: str                 # "rolling" | "reference"
     median: float
     mad: float
-    spread: float             # max(1.4826 * MAD, floor)
+    spread: float             # max(1.4826 * MAD, absolute floor, relative floor * |median|)
     n: int
     flight_ids: List[int] = field(default_factory=list)
 
@@ -132,7 +146,7 @@ def _baseline(kind: str, obs: Sequence[Observation], feature_key: str) -> Option
     vals = np.array([o.value for o in obs], dtype=np.float64)
     med = float(np.median(vals))
     mad = float(np.median(np.abs(vals - med)))
-    floor = SIGMA_FLOOR.get(feature_key, 0.0)
+    floor = max(SIGMA_FLOOR.get(feature_key, 0.0), RELATIVE_FLOOR.get(feature_key, 0.0) * abs(med))
     return Baseline(kind, med, mad, max(MAD_TO_SIGMA * mad, floor), len(obs), [o.flight_id for o in obs])
 
 

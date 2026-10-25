@@ -327,6 +327,45 @@ def test_pattern_finding_names_the_motor():
     print(f"PASS: spread step with one motor high -> \"{f['text']}\" with ranked prop/motor/ESC/arm causes")
 
 
+def test_findings_collapse_by_cause():
+    """One physical problem, one line: p50 and p95 share the vibration cause
+    row; spread and hover don't share a row and stay separate."""
+    ov = {"vib.metric_p50": 4.6, "vib.metric_p95": 10.6, "act.hover": 0.60}
+    reps = R.analyse(history(6, overrides_at={5: ov}))
+    fs = reps[5]["findings"]
+    keys = [f["key"] for f in fs]
+    vib = [f for f in fs if f["cause_group"] == "vib.metric"]
+    assert len(vib) == 1 and [r["key"] for r in vib[0]["related"]] in (["vib.metric_p95"], ["vib.metric_p50"]), keys
+    assert vib[0]["score"] <= vib[0]["related"][0]["score"]          # the lead is the worst-scored member
+    assert "act.hover" in keys and len(fs) == 2
+    assert reps[5]["verdict"]["headline"] == "2 things to look at"
+    print(f"PASS: p50 + p95 -> one vibration finding (lead {vib[0]['key']}, related "
+          f"{vib[0]['related'][0]['key']}); hover stays separate; verdict counts 2 causes")
+
+
+def test_checklist_headline_counts_causes():
+    r = R.analyse(history(1, overrides_at={0: {"gps.nsats_p10": 4.0, "gps.eph_p50": 3.4}}))[0]
+    assert len(r["findings"]) == 1 and r["findings"][0]["cause_group"] == "gps.position"
+    assert r["verdict"]["headline"] == "First flight logged: 7 of 9 checks OK, 1 to look at", r["verdict"]["headline"]
+    print(f"PASS: two GPS checks fail on flight 1 -> one cause: \"{r['verdict']['headline']}\"")
+
+
+def test_relative_floor_softens_the_p95_case():
+    """The flight-5 case: a 29% p95 rise over a tight history. The spread is
+    10% of the median, not the 0.5 m/s^2 absolute floor."""
+    from app.services.health.baseline import Baseline, robust_z, HIGHER_IS_WORSE, process_history, Observation
+    vals = [11.3, 11.2, 11.35, 11.4]
+    res = process_history([Observation(i + 1, v) for i, v in enumerate(vals)], "vib.metric_p95")
+    assert abs(res.rolling.spread - 0.1 * res.rolling.median) < 1e-9
+    z = robust_z(11.314 * 1.288, res.rolling, HIGHER_IS_WORSE)
+    score = S.baseline_score(z)
+    assert 65 < score < 80, score
+    small = process_history([Observation(i + 1, v) for i, v in enumerate([3.0, 3.1, 2.9, 3.0])], "vib.metric_p50")
+    assert small.rolling.spread == 0.5                                 # absolute floor still binds at low levels
+    print(f"PASS: p95 +28.8% over a tight history -> spread {res.rolling.spread:.3f} (10% of median), "
+          f"z {z:.2f}, score {score:.1f}; a 3 m/s² drone keeps the 0.5 absolute floor")
+
+
 # §6 claims a finding must never be able to make, one or more per item.
 FORBIDDEN_SAMPLES = [
     "Motor 3 has about 40 hours left", "Props near end of life", "Remaining life: 120 cycles",   # 6.1
@@ -411,7 +450,7 @@ def test_real_fixture_flight_one():
     assert rep["overall_score"] is None and rep["subsystem_scores"]["IMU & vibration"] is not None
     assert [f["key"] for f in rep["findings"]] == ["vib.metric_p50"]
     assert rep["findings"][0]["text"] == "Early read: Vibration 5.5 m/s², above PX4's 4.9 guide"
-    assert rep["verdict"]["headline"] == "First flight logged: 8 OK, 1 to look at"
+    assert rep["verdict"]["headline"] == "First flight logged: 8 of 9 checks OK, 1 to look at"
     assert {g["feature"] for g in rep["logging_gaps"]} == {"vib.band_hi", "pwr.cell_delta"}
     print(f"PASS: real hex as flight 1 -> \"{rep['verdict']['headline']}\" / \"{rep['findings'][0]['text']}\"")
 
