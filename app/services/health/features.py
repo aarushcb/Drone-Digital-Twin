@@ -43,6 +43,9 @@ VIB, MOT, PWR, ATT, POS = "IMU & vibration", "Actuators", "Power", "Attitude & r
 
 # Gates and constants, each from the spec.
 MIN_SAMPLES = 10                 # fewer samples than this is not a distribution
+# TODO(calibrate): the 30% current-range gate (spec 1.2) is judgement.
+# Calibrate by checking how far the fitted R drifts from a bench-measured
+# pack resistance as the current range of the flight shrinks.
 CURRENT_RANGE_FRACTION = 0.30    # spec 1.2: p95-p5 of current >= 30% of its mean
 SAT_THRESHOLD = 0.98             # spec 1.2: a motor at >= 98% normalised is saturated
 PRE_TAKEOFF_S = 5.0              # "just before takeoff" window for pwr.sag_hover
@@ -51,9 +54,10 @@ MANOEUVRE_RATE_RADPS = 0.3       # same 0.3 rad/s as the steady threshold: above
 MIN_MANOEUVRE_S = 10.0           # need >= 10 s of manoeuvring to measure tracking
 BANDS_HZ = {"vib.band_lo": (0.0, 5.0), "vib.band_struct": (5.0, 20.0), "vib.band_hi": (20.0, None)}
 
-# ponytail: pattern-classification cut-offs are judgement, not calibrated
-# against real multi-drone data. Revisit with the spec 2.1 sigma floors once
-# real histories exist.
+# TODO(calibrate): pattern-classification cut-offs are judgement, not
+# calibrated. Calibrate against drones with a known fault injected (one
+# chipped prop, a known CG shift, one motor deliberately tilted) and pick
+# the cut-offs that separate those cases from healthy flights.
 PATTERN_BALANCED_SPREAD = 0.02   # spec 2.1 sigma_floor for act.spread
 PATTERN_SINGLE_SHARE = 0.5       # one motor carries >= half the squared deviation
 PATTERN_MODEL_R2 = 0.6           # a geometric explanation must explain >= 60%

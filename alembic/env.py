@@ -26,7 +26,7 @@ from app.config import settings
 # somewhere; without this, autogenerate would see an empty target schema
 # and try to DROP every real table. Mirrors main.py's own import list.
 from app.database.database import Base
-from app.models import user, drone, telemetry, scene_object  # noqa: F401 -- import so tables register
+from app.models import user, drone, telemetry, scene_object, health  # noqa: F401 -- import so tables register
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
