@@ -30,6 +30,7 @@ class FlightInput:
     watched: Dict[str, object] = field(default_factory=dict)
     log_meta: Dict[str, object] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    when: Optional[str] = None           # ISO date of the flight (log clock, else upload time); Trends labels
 
 
 def _observation(fl: FlightInput, f: Feature) -> B.Observation:

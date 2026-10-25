@@ -84,7 +84,7 @@ def test_every_endpoint_requires_auth():
              ("get", f"/drones/{d}/flights/1/report"), ("patch", f"/drones/{d}/flights/1"),
              ("post", f"/drones/{d}/config-changes"), ("get", f"/drones/{d}/config-changes"),
              ("post", f"/drones/{d}/packs"), ("get", f"/drones/{d}/packs"), ("patch", f"/drones/{d}/packs/1"),
-             ("delete", f"/drones/{d}/packs/1")]
+             ("delete", f"/drones/{d}/packs/1"), ("get", f"/drones/{d}/trends")]
     for method, path in calls:
         assert getattr(client, method)(path).status_code == 401, (method, path)
     print(f"PASS: all {len(calls)} health endpoints return 401 without a token")
@@ -95,6 +95,7 @@ def test_other_users_get_404_everywhere():
     pack = client.post(f"/drones/{d}/packs", headers=h, json={"label": "A"}).json()
     hx, dx = user("intruder")
     for method, path, kw in [("get", f"/drones/{d}/flights", {}), ("get", f"/drones/{d}/packs", {}),
+                             ("get", f"/drones/{d}/trends", {}),
                              ("get", f"/drones/{d}/config-changes", {}),
                              ("post", f"/drones/{d}/config-changes", {"json": {"change_type": "props"}}),
                              ("patch", f"/drones/{d}/packs/{pack['id']}", {"json": {"label": "x"}}),
@@ -257,6 +258,10 @@ def test_second_flight_change_declaration_and_pack_reassignment():
     r_cell = next(x for x in rep2["features"] if x["key"] == "pwr.r_cell")
     assert r_cell["group"].startswith(f"pack:{pack}/")   # same pack, but the detected pack/frame change starts a new group
     assert client.patch(f"/drones/{d}/flights/{f2['id']}", headers=h, json={"pack_id": 999999}).status_code == 404
+    tr = client.get(f"/drones/{d}/trends", headers=h)
+    assert tr.status_code == 200 and tr.json()["flights"] == 2
+    assert [c["key"] for c in tr.json()["cards"]] == ["vibration", "motors", "power"]
+    assert client.get(f"/drones/{d}/trends").status_code == 401
     db = SessionLocal()
     cached = db.query(FeatureBaseline).filter_by(drone_id=d).count()
     db.close()

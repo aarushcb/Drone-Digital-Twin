@@ -8,6 +8,7 @@ or changes, even by guessing ids.
 Uploads are a job the app polls (see services/health/store.py for why):
   POST /drones/{id}/flights            -> 202 {flight_id, status: "queued"}
   GET  /drones/{id}/flights/{fid}      -> status, plus the report once done
+  GET  /drones/{id}/trends             -> spec §4.4 series and callouts
 """
 
 import os
@@ -221,6 +222,15 @@ def update_flight(drone_id: int, flight_id: int, body: FlightPatch, db: Session 
     store.persist_analysis(db, drone_id, reports)
     db.commit()
     return _flight_json(f, reports.get(f.id))
+
+
+@router.get("/drones/{drone_id}/trends")
+def get_trends(drone_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Spec §4.4: raw feature values per flight against the frozen epoch
+    reference, published guide lines, change boundaries and Step/Drift/Guide
+    callouts."""
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    return store.drone_trends(db, drone_id)
 
 
 # ---------------------------------------------------------------- configuration changes

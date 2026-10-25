@@ -189,7 +189,11 @@ def admission(obs: Observation, prior_admitted: Sequence[Observation], feature_k
         return False, "feature_invalid"
     if obs.absolute_bad:
         return False, "absolute_bad"
-    if len(prior_admitted) >= PERSONAL_MIN_FLIGHTS:
+    # Gate (d) only for baselined features: the rest (act.mean, act.pattern,
+    # pwr.v_cell_min) have no spread floor, so an unchanging history would
+    # give a zero spread and a division by zero, and they're never scored
+    # against a baseline anyway.
+    if feature_key in DIRECTION and len(prior_admitted) >= PERSONAL_MIN_FLIGHTS:
         base = rolling_baseline(prior_admitted, feature_key)
         z = robust_z(obs.value, base, TWO_SIDED)
         if z > ADMISSION_MAX_MODIFIED_Z:

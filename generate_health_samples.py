@@ -39,6 +39,7 @@ NOISE_FRACTION_OF_FLOOR = 0.5
 NOISE_MAX_RELATIVE = 0.05
 NO_FLOOR_RELATIVE = 0.01
 FLIGHT5_VIBRATION_FACTOR = 1.28
+TREND_CREEP = 0.4
 INTEGER_FEATURES = {"gps.nsats_p10", "gps.noise", "gps.jamming"}
 
 
@@ -127,7 +128,38 @@ def main():
         f"{int(NOISE_MAX_RELATIVE * 100)}% of value), and flight 5 has vibration p50/p95 multiplied by "
         f"{FLIGHT5_VIBRATION_FACTOR} on purpose.", size, parsed.meta.sha256, synthetic=True)
 
+    # Trends fixture (spec §4.4): 14 synthesized flights on two packs; a
+    # declared prop change at flight 7 drops vibration 0.6 m/s^2, after which
+    # it creeps up 0.35 m/s^2 per flight; flight 4 has 7 clipping events.
+    from app.services.health import trends as TR
+    rng_t = np.random.default_rng(SEED + 1)
+    base_day = datetime.date(2026, 9, 1)
+    t_hist = []
+    for i in range(14):
+        fv = feats if i == 0 else vary(feats, rng_t)
+        if i >= 6:
+            fv = copy.deepcopy(fv)
+            for f in fv:
+                if f.key == "vib.metric_p50" and f.value is not None:
+                    f.value = f.value - 0.6 + TREND_CREEP * (i - 6)
+        if i == 3:
+            fv = copy.deepcopy(fv)
+            for f in fv:
+                if f.key == "vib.clip_rate":
+                    f.value, f.detail = 7 / (window.airborne_s / 60), dict(f.detail, clip_events=7)
+        fl = flight(i + 1, fv, dict(meta, synthetic=i > 0))
+        fl.pack_id, fl.when = 1 + i % 2, (base_day + datetime.timedelta(days=3 * i)).isoformat()
+        t_hist.append(fl)
+    trends = TR.build(t_hist, [E.ConfigEvent(6, "props", "user", note="new props")])
+    trends["_sample"] = sample_block(
+        "Developer fixture for the Trends screen. Not bundled in the app.",
+        "14 SYNTHESIZED flights: flight 1 is the real log above, flights 2-14 reuse its features with seeded "
+        "noise. A prop change is declared at flight 7, where vibration drops 0.6 m/s², then creeps up "
+        f"{TREND_CREEP} m/s² per flight; flight 4 has 7 clipping events; packs alternate 1 and 2.",
+        size, parsed.meta.sha256, synthetic=True)
+
     outputs = [(os.path.join(out_dir, "health-report-flight1.json"), first),
+               (os.path.join(out_dir, "trends-sample.json"), trends),
                (os.path.join(out_dir, "health-report-flight5.json"), fifth)]
     if os.path.isdir(os.path.dirname(BUNDLED_SAMPLE)):
         outputs.append((BUNDLED_SAMPLE, first))    # spec §9 step 11: the bundled sample is the computed flight 1

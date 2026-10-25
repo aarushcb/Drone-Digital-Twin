@@ -123,8 +123,16 @@ def _inputs(db: Session, flights: List[Flight]) -> List[R.FlightInput]:
                          reason=r.reason, detail=dict(r.detail or {})) for r in rows.get(fl.id, [])]
         out.append(R.FlightInput(fl.id, fl.autopilot, feats, _window_of(fl), pack_id=fl.pack_id,
                                  watched=dict(fl.watched_params or {}), log_meta=dict(fl.log_meta or {}),
-                                 warnings=[]))   # warnings are stored already merged with the window's
+                                 warnings=[],    # warnings are stored already merged with the window's
+                                 when=(fl.flown_at or fl.uploaded_at).isoformat() if (fl.flown_at or fl.uploaded_at) else None))
     return out
+
+
+def drone_trends(db: Session, drone_id: int) -> dict:
+    """Spec §4.4 Trends series for every analysed flight."""
+    from .trends import build
+    done = [f for f in ordered_flights(db, drone_id) if f.status == "done"]
+    return build(_inputs(db, done), declared_events(db, drone_id, done))
 
 
 def drone_reports(db: Session, drone_id: int) -> Dict[int, dict]:
