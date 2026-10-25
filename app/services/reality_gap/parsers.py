@@ -181,6 +181,8 @@ class LogMeta:
     # the airframe. Whoever computes 3.7 has to know where the wall is.
     imu_accel_cutoff: Optional[float] = None
     imu_gyro_cutoff: Optional[float] = None
+    hardware: Optional[str] = None           # ULog ver_hw, e.g. CUBEPILOT_CUBEORANGEPLUS
+    firmware_release: Optional[str] = None   # decoded ver_sw_release (+ branch), e.g. "1.14.0 dev (mbc_1.14.3)"
 
 
 @dataclass
@@ -920,7 +922,20 @@ def _ulog_meta(path, info, signals, params, pwm_range) -> LogMeta:
         actuator_pwm_range=pwm_range,
         imu_accel_cutoff=params.get("IMU_ACCEL_CUTOFF"),
         imu_gyro_cutoff=params.get("IMU_GYRO_CUTOFF"),
+        hardware=str(info["ver_hw"]) if "ver_hw" in info else None,
+        firmware_release=_px4_release(info.get("ver_sw_release"), info.get("ver_sw_branch")),
     )
+
+
+def _px4_release(code, branch) -> Optional[str]:
+    """ULog ver_sw_release is 0xMMmmppTT: major, minor, patch, type, where
+    type 255 is a release and lower values are dev (0), alpha (64), beta (128)
+    or rc (192) builds (PX4 src/lib/version/version.h)."""
+    if not isinstance(code, int) or code == 0:
+        return None
+    major, minor, patch, kind = code >> 24, (code >> 16) & 0xFF, (code >> 8) & 0xFF, code & 0xFF
+    label = "" if kind == 255 else " " + ("rc" if kind >= 192 else "beta" if kind >= 128 else "alpha" if kind >= 64 else "dev")
+    return f"{major}.{minor}.{patch}{label}" + (f" ({branch})" if branch else "")
 
 
 # ---------------------------------------------------------------------------

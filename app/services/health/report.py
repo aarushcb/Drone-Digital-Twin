@@ -168,6 +168,9 @@ def _feature_json(fs: S.FeatureScore) -> dict:
     f = fs.feature
     return {
         "key": f.key, "subsystem": f.subsystem, "value": _r(f.value, 6), "label": f.label, "unit": f.unit,
+        # Display copy from the same table the findings use, so the app never re-formats a number.
+        "name": F.DISPLAY[f.key].name if f.key in F.DISPLAY else None,
+        "figure": F.figure(f.value, F.DISPLAY[f.key]) if f.key in F.DISPLAY and f.value is not None else None,
         "tier": f.tier, "valid": f.valid, "reason": f.reason, "status": fs.status, "group": fs.group,
         "unscored_reason": fs.unscored_reason, "mode": fs.mode, "basis": fs.basis, "n": fs.n,
         "baseline": _baseline_json(fs.rolling, fs.group), "reference": _baseline_json(fs.reference, fs.group),

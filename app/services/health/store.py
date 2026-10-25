@@ -254,6 +254,7 @@ def _analyse_log(db: Session, fl: Flight, path: str) -> None:
     fl.watched_params = _jsonable(E.watched_params(parsed.params, m.firmware_version))
     fl.warnings = list(parsed.warnings) + list(w.warnings)
     fl.log_meta = {"filename": fl.log_filename, "sha256": m.sha256, "source_format": m.source_format,
+                   "size_bytes": os.path.getsize(path), "hardware": m.hardware, "firmware_release": m.firmware_release,
                    "duration_s": round(m.duration_s, 2), "firmware_version": m.firmware_version,
                    "airframe": m.airframe, "start_time_utc": start}
     db.query(FlightFeature).filter_by(flight_id=fl.id).delete()
