@@ -266,49 +266,39 @@ def _build_ulog_with_n_motors(path, n_motors, *, with_rotor_count_param):
 
 
 def test_hexarotor_actuator_outputs_all_captured_and_warned():
-    """The bug: parsers.py hardcoded range(4) for actuator_outputs, so a
-    hexarotor's motors 5 and 6 vanished with no trace. Spec 5.2's own
-    canonical schema caps act.out at [0..3] (also baked into 4.2's
-    subsystem grouping and 4.3's coverage count), so this fix does NOT
-    widen the schema -- that needs a spec amendment, which is Cowork's to
-    write. What it fixes: the truncation is now a structured, parseable
-    warning instead of a silent data loss with no trace at all."""
+    """Health spec amendment A-1 replaced spec 5.2's act.out[0..3] cap: every
+    motor is captured, by motor number. This synthetic hex has CA_ROTOR_COUNT
+    but no output-function parameters, so the channel -> motor mapping is an
+    assumption, and the parser has to say so rather than present it as fact."""
     path = os.path.join(FIXTURES, "hexarotor_6motor.ulg")
     _build_ulog_with_n_motors(path, 6, with_rotor_count_param=True)
     try:
         parsed = parse_log(path)
-        # Schema-compliant: exactly act.out0-3 are captured, same as a quad.
         captured = sorted(k for k in parsed.signals if k.startswith("act.out"))
-        assert captured == ["act.out0", "act.out1", "act.out2", "act.out3"], captured
-        # But the loss is now VISIBLE, structured, and counts correctly.
-        matches = [w for w in parsed.warnings if w.startswith("actuator_outputs_truncated:")]
-        assert len(matches) == 1, parsed.warnings
-        warning = matches[0]
-        assert "total=6" in warning
-        assert "captured=4" in warning
-        assert "missing=2" in warning
-        assert "source=CA_ROTOR_COUNT" in warning
-        print(f"PASS: 6-motor log -> act.out0-3 captured (schema-compliant), "
-              f"warning '{warning}' makes motors 5-6 visible instead of silent")
+        assert captured == [f"act.out{i}" for i in range(6)], captured
+        assert parsed.motor_info["motor_count"] == 6
+        assert parsed.motor_info["motor_count_source"] == "CA_ROTOR_COUNT"
+        assert parsed.motor_info["mapping_source"] == "channel_order_assumed"
+        assert any(w.startswith("actuator_mapping_assumed:") for w in parsed.warnings), parsed.warnings
+        assert not any(w.startswith("actuator_outputs_truncated:") for w in parsed.warnings)
+        print("PASS: 6-motor log -> act.out0-5 all captured (A-1), mapping flagged as assumed")
     finally:
         os.remove(path)
 
 
 def test_hexarotor_without_rotor_count_param_uses_nonzero_heuristic():
-    """Older firmware has no CA_ROTOR_COUNT. The fallback must still catch
-    the truncation, distinguishing a real (always-nonzero) PWM trace from
-    the always-exactly-0.0 padding in the unused struct slots -- verified
-    against the real reference log's own padding behaviour."""
+    """Older firmware has no CA_ROTOR_COUNT. The fallback must still find all
+    six motors, distinguishing a real (always-nonzero) PWM trace from the
+    always-exactly-0.0 padding in the unused struct slots -- verified against
+    the real reference log's own padding behaviour."""
     path = os.path.join(FIXTURES, "hexarotor_6motor_noparam.ulg")
     _build_ulog_with_n_motors(path, 6, with_rotor_count_param=False)
     try:
         parsed = parse_log(path)
-        matches = [w for w in parsed.warnings if w.startswith("actuator_outputs_truncated:")]
-        assert len(matches) == 1, parsed.warnings
-        assert "total=6" in matches[0]
-        assert "source=nonzero_output_heuristic" in matches[0]
-        print(f"PASS: no CA_ROTOR_COUNT -> nonzero-value fallback still finds 6 motors "
-              f"('{matches[0]}')")
+        assert parsed.motor_info["motor_count"] == 6, parsed.motor_info
+        assert parsed.motor_info["motor_count_source"] == "nonzero_output_heuristic"
+        assert sorted(k for k in parsed.signals if k.startswith("act.out")) == [f"act.out{i}" for i in range(6)]
+        print("PASS: no CA_ROTOR_COUNT -> nonzero-value fallback still finds and captures 6 motors")
     finally:
         os.remove(path)
 

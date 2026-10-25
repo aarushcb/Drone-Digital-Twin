@@ -189,6 +189,14 @@ class ParsedLog:
     params: Dict[str, float]
     meta: LogMeta
     warnings: List[str] = field(default_factory=list)
+    # Health spec 1.1: per requested topic, whether it was logged, how many
+    # instances, which instance was read and at what rate. A feature that
+    # can't be computed returns null with a reason drawn from here, rather
+    # than a number from data that was never logged.
+    topic_info: Dict[str, dict] = field(default_factory=dict)
+    # Health spec A-1: motor count, its source, and how output channels were
+    # mapped to motor numbers.
+    motor_info: Dict[str, object] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +369,13 @@ ULOG_TOPICS = [
     "vehicle_imu_status",
     "cpuload",
     "vehicle_status",
+    # Health spec 1.2 additions.
+    "vehicle_attitude_setpoint",
+    "failure_detector_status",
+    "estimator_status",
+    "estimator_selector_status",
+    "actuator_motors",
+    "vehicle_land_detected",
 ]
 
 # (canonical_key, ulog_topic, ulog_field, scale) -- scale applied as
@@ -393,7 +408,35 @@ ULOG_DIRECT_MAP: List[Tuple[str, str, str, float]] = [
     ("batt.current", "battery_status", "current_filtered_a", 1.0),
     ("cpu.load", "cpuload", "load", 1.0),
     ("mem.free", "cpuload", "ram_usage", 1.0),
+    # Health spec 1.2. Raw (unfiltered) battery fields: the resistance fit
+    # needs them, because the _filtered fields lag and bias the dV/dI slope.
+    ("batt.voltage_raw", "battery_status", "voltage_v", 1.0),
+    ("batt.current_raw", "battery_status", "current_a", 1.0),
+    ("batt.discharged_mah", "battery_status", "discharged_mah", 1.0),
+    ("batt.cell_delta", "battery_status", "max_cell_voltage_delta", 1.0),
+    ("batt.cell_count", "battery_status", "cell_count", 1.0),
+    ("gps.sacc", "vehicle_gps_position", "s_variance_m_s", 1.0),
+    ("gps.noise", "vehicle_gps_position", "noise_per_ms", 1.0),
+    ("gps.jamming", "vehicle_gps_position", "jamming_indicator", 1.0),
+    ("fd.imbalance", "failure_detector_status", "imbalanced_prop_metric", 1.0),
+    ("est.vel_tr", "estimator_status", "vel_test_ratio", 1.0),
+    ("est.pos_tr", "estimator_status", "pos_test_ratio", 1.0),
+    ("est.hgt_tr", "estimator_status", "hgt_test_ratio", 1.0),
+    ("est.mag_tr", "estimator_status", "mag_test_ratio", 1.0),
+    ("imu.clip0", "vehicle_imu_status", "accel_clipping[0]", 1.0),
+    ("imu.clip1", "vehicle_imu_status", "accel_clipping[1]", 1.0),
+    ("imu.clip2", "vehicle_imu_status", "accel_clipping[2]", 1.0),
+    ("land.landed", "vehicle_land_detected", "landed", 1.0),
 ]
+
+# State flags, not telemetry: a log carrying only these still has nothing to
+# analyse, so it is still an empty log (spec 9 case 6).
+BOOKKEEPING_SIGNALS = {"status.armed", "land.landed"}
+
+# PX4 output functions 101..112 are Motor 1..12 (control allocation, v1.13+).
+MOTOR_FUNCTION_BASE = 101
+# Output banks whose channel -> function mapping lives in <PREFIX>_FUNC<n>.
+OUTPUT_BANK_PREFIXES = ("PWM_MAIN", "PWM_AUX", "PWM_EXTRA", "UAVCAN_EC")
 
 DEFAULT_PWM_MIN = 1000.0
 DEFAULT_PWM_MAX = 2000.0
@@ -429,11 +472,46 @@ def parse_ulog(path: str) -> ParsedLog:
     if getattr(ulog, "file_corruption", False):
         warnings.append("partial_parse_recovered")
 
-    datasets = {d.name: d for d in ulog.data_list}
     signals: Dict[str, Signal] = {}
 
     def topic_time(ds) -> np.ndarray:
         return np.asarray(ds.data["timestamp"], dtype=np.int64)
+
+    # Multi-instance topics (several IMUs, several EKFs, several output banks)
+    # appear once per instance in data_list. A plain {name: ds} dict keeps
+    # whichever instance comes LAST, which on the reference hex log was the
+    # AUX output bank (not the motors), a secondary IMU and a secondary EKF.
+    # Pick each one deliberately instead.
+    instances: Dict[str, list] = {}
+    for d in ulog.data_list:
+        instances.setdefault(d.name, []).append(d)
+    for lst in instances.values():
+        lst.sort(key=lambda d: d.multi_id)
+    datasets = {name: lst[0] for name, lst in instances.items()}
+    params = {k: float(v) for k, v in ulog.initial_parameters.items() if isinstance(v, (int, float))}
+
+    # EKF: the instance the selector says is primary (the most common value
+    # over the log, since it can switch mid-flight).
+    sel = datasets.get("estimator_selector_status")
+    if sel is not None and "primary_instance" in sel.data and "estimator_status" in instances:
+        prim = np.asarray(sel.data["primary_instance"], dtype=np.int64)
+        if prim.size:
+            vals, counts = np.unique(prim, return_counts=True)
+            primary = int(vals[np.argmax(counts)])
+            match = [d for d in instances["estimator_status"] if d.multi_id == primary]
+            if match:
+                datasets["estimator_status"] = match[0]
+    # IMU: the vehicle_imu_status instance whose accelerometer the primary
+    # EKF is actually using.
+    est = datasets.get("estimator_status")
+    if est is not None and "accel_device_id" in est.data and "vehicle_imu_status" in instances:
+        dev = int(np.asarray(est.data["accel_device_id"])[0])
+        match = [d for d in instances["vehicle_imu_status"]
+                 if "accel_device_id" in d.data and int(np.asarray(d.data["accel_device_id"])[0]) == dev]
+        if match:
+            datasets["vehicle_imu_status"] = match[0]
+
+    topic_info: Dict[str, dict] = {}
 
     # --- attitude: quaternion -> Euler, per spec 5.2 [DECISION] ---
     att = datasets.get("vehicle_attitude")
@@ -444,6 +522,14 @@ def parse_ulog(path: str) -> ParsedLog:
         _store(signals, warnings, "att.roll", t, roll)
         _store(signals, warnings, "att.pitch", t, pitch)
         _store(signals, warnings, "att.yaw", t, unwrap_yaw(yaw.astype(np.float32)))
+        for name, q in zip(("qw", "qx", "qy", "qz"), (qw, qx, qy, qz)):
+            _store(signals, warnings, f"att.{name}", t, q)
+    # Health spec 1.2: attitude setpoint quaternion, for tracking error.
+    att_sp = datasets.get("vehicle_attitude_setpoint")
+    if att_sp is not None and all(f"q_d[{i}]" in att_sp.data for i in range(4)):
+        t = topic_time(att_sp)
+        for i, name in enumerate(("qw", "qx", "qy", "qz")):
+            _store(signals, warnings, f"att_sp.{name}", t, np.asarray(att_sp.data[f"q_d[{i}]"], dtype=np.float64))
 
     # --- everything with a straight field mapping ---
     for key, topic, field_name, scale in ULOG_DIRECT_MAP:
@@ -469,33 +555,8 @@ def parse_ulog(path: str) -> ParsedLog:
             np.asarray(imu_status.data["accel_vibration_metric"], dtype=np.float64),
         )
 
-    params = {k: float(v) for k, v in ulog.initial_parameters.items() if isinstance(v, (int, float))}
-
-    # --- actuator outputs, normalised to [0,1] per spec 5.2 [DECISION] ---
-    # spec 5.2's canonical schema is act.out[0..3] -- a fixed 4 channels,
-    # unchanged here. That is correct for a quadrotor and WRONG for a
-    # hex/octo, which silently loses motors 5+ with no trace. This does
-    # not widen the schema (that needs a spec amendment authorizing
-    # act.out[0..N] and updating 4.2/4.3's subsystem+coverage tables,
-    # which is Cowork's to write, not this pass's) -- it only makes the
-    # truncation VISIBLE via a structured warning instead of silent.
-    pwm_min = float(params.get("PWM_MAIN_MIN", params.get("PWM_MIN", DEFAULT_PWM_MIN)))
-    pwm_max = float(params.get("PWM_MAIN_MAX", params.get("PWM_MAX", DEFAULT_PWM_MAX)))
-    act = datasets.get("actuator_outputs")
-    if act is not None:
-        t = topic_time(act)
-        for i in range(4):
-            fname = f"output[{i}]"
-            if fname not in act.data:
-                continue
-            raw = np.asarray(act.data[fname], dtype=np.float64)
-            _store(signals, warnings, f"act.out{i}", t, _normalise_actuator(raw, pwm_min, pwm_max))
-        n_actual, count_source = _actual_actuator_count_ulog(act.data, params)
-        if n_actual > 4:
-            warnings.append(
-                f"actuator_outputs_truncated:total={n_actual},captured=4,"
-                f"missing={n_actual - 4},source={count_source}"
-            )
+    # --- actuators (health spec amendment A-1: every motor, not the first four) ---
+    act_info = _parse_ulog_actuators(instances, datasets, params, signals, warnings, topic_time)
 
     # Arming state -> status.armed, so align.find_arm_anchor's arm_event
     # branch is reachable on a real log. PX4 vehicle_status.arming_state:
@@ -508,14 +569,42 @@ def parse_ulog(path: str) -> ParsedLog:
 
     # Free the main pass's buffers before the FIFO pass allocates its own,
     # so the two never coexist at peak. Only the small info dict survives.
+    for topic in ULOG_TOPICS:
+        lst = instances.get(topic)
+        if not lst:
+            topic_info[topic] = {"present": False}
+            continue
+        chosen = datasets[topic]
+        t = np.asarray(chosen.data["timestamp"], dtype=np.int64)
+        rate = None
+        if t.size >= 2:
+            dts = np.diff(t)[np.diff(t) > 0]
+            if dts.size:
+                rate = round(1e6 / float(np.median(dts)), 2)
+        topic_info[topic] = {
+            "present": True,
+            "instances": len(lst),
+            "selected_instance": int(chosen.multi_id),
+            "rate_hz": rate,
+            "samples": int(t.size),
+        }
     info = dict(getattr(ulog, "msg_info_dict", {}) or {})
-    del datasets, ulog
+    del datasets, instances, ulog
     _parse_fifo_topics(path, signals, warnings)
 
-    meta = _ulog_meta(path, info, signals, params, (pwm_min, pwm_max))
-    if not signals:
+    for fifo_topic, prefix in FIFO_TOPIC_KEYS.items():
+        sig = signals.get(f"{prefix}.x")
+        topic_info[fifo_topic] = (
+            {"present": True, "rate_hz": round(sig.native_rate_hz, 2) if sig.native_rate_hz else None}
+            if sig is not None else {"present": False}
+        )
+
+    pwm_range = act_info.pop("pwm_range", None)
+    meta = _ulog_meta(path, info, signals, params, pwm_range)
+    if not (set(signals) - BOOKKEEPING_SIGNALS):
         raise EmptyLogError(f"{os.path.basename(path)} contains no usable telemetry")
-    return ParsedLog(signals=signals, params=params, meta=meta, warnings=warnings)
+    return ParsedLog(signals=signals, params=params, meta=meta, warnings=warnings,
+                     topic_info=topic_info, motor_info=act_info)
 
 
 def _parse_fifo_topics(path: str, signals: Dict[str, Signal], warnings: List[str]) -> None:
@@ -636,6 +725,96 @@ def _parse_fifo_topics(path: str, signals: Dict[str, Signal], warnings: List[str
                 )
         if prefix not in "".join(warnings):
             warnings.append(f"fifo_expanded:{ds.name}")
+
+
+def _parse_ulog_actuators(instances, datasets, params, signals, warnings, topic_time) -> Dict[str, object]:
+    """
+    Every motor, by MOTOR number rather than output channel (health spec A-1).
+
+    Two sources, both recorded:
+
+    * act.motor{i} from actuator_motors.control[i]: the control allocator's
+      per-motor command, already in motor order and normalised 0..1 (PX4
+      v1.13+). This is what the health features use.
+    * act.out{i} from actuator_outputs, mapped channel -> motor through the
+      <BANK>_FUNC<n> parameters (101 = Motor 1) and normalised with that
+      channel's own <BANK>_MIN<n>/<BANK>_MAX<n>. On the reference hex the
+      limits are 1155-1900 us, so the old fixed 1000-2000 normalisation was
+      wrong, and the motors live on instance 0 while instance 1 is the AUX
+      bank, so the old last-instance read was wrong too.
+
+    Logs from firmware without output functions fall back to the old
+    behaviour (instance 0, channels in order, bank-level or default limits),
+    flagged as an assumption.
+    """
+    info: Dict[str, object] = {}
+    act_lst = instances.get("actuator_outputs") or []
+    act0 = act_lst[0] if act_lst else None
+    n_motors, count_source = (_actual_actuator_count_ulog(act0.data, params) if act0 is not None else (0, "none"))
+    info["motor_count"] = n_motors
+    info["motor_count_source"] = count_source
+
+    motors = datasets.get("actuator_motors")
+    if motors is not None and n_motors:
+        t = topic_time(motors)
+        for i in range(n_motors):
+            fname = f"control[{i}]"
+            if fname in motors.data:
+                _store(signals, warnings, f"act.motor{i}", t, np.asarray(motors.data[fname], dtype=np.float64))
+
+    # Channel -> motor mapping from output functions.
+    mapping = {}  # motor index -> (bank prefix, 1-based channel)
+    for prefix in OUTPUT_BANK_PREFIXES:
+        for ch in range(1, 17):
+            fn = params.get(f"{prefix}_FUNC{ch}")
+            if fn is not None and MOTOR_FUNCTION_BASE <= int(fn) < MOTOR_FUNCTION_BASE + 12:
+                mapping.setdefault(int(fn) - MOTOR_FUNCTION_BASE, (prefix, ch))
+
+    def channel_limits(prefix: str, ch: int) -> Tuple[float, float]:
+        lo = params.get(f"{prefix}_MIN{ch}", params.get(f"{prefix}_MIN", params.get("PWM_MIN", DEFAULT_PWM_MIN)))
+        hi = params.get(f"{prefix}_MAX{ch}", params.get(f"{prefix}_MAX", params.get("PWM_MAX", DEFAULT_PWM_MAX)))
+        return float(lo), float(hi)
+
+    if act_lst and mapping and n_motors:
+        # Which logged instance carries the motors: the one where the most
+        # motor-mapped channels actually move.
+        def moving(ds) -> int:
+            hits = 0
+            for _, ch in mapping.values():
+                f = f"output[{ch - 1}]"
+                if f in ds.data and np.ptp(np.asarray(ds.data[f], dtype=np.float64)) > 0:
+                    hits += 1
+            return hits
+        chosen = max(act_lst, key=lambda d: (moving(d), -d.multi_id))
+        t = topic_time(chosen)
+        ranges = []
+        for i in range(n_motors):
+            if i not in mapping:
+                continue
+            prefix, ch = mapping[i]
+            f = f"output[{ch - 1}]"
+            if f not in chosen.data:
+                continue
+            lo, hi = channel_limits(prefix, ch)
+            ranges.append((lo, hi))
+            _store(signals, warnings, f"act.out{i}", t, _normalise_actuator(np.asarray(chosen.data[f], dtype=np.float64), lo, hi))
+        info["mapping_source"] = "output_functions"
+        info["actuator_outputs_instance"] = int(chosen.multi_id)
+        info["channel_of_motor"] = {i: f"{p}{c}" for i, (p, c) in sorted(mapping.items()) if i < n_motors}
+        if ranges:
+            info["pwm_range"] = (min(r[0] for r in ranges), max(r[1] for r in ranges))
+    elif act0 is not None and n_motors:
+        lo, hi = channel_limits("PWM_MAIN", 0)
+        t = topic_time(act0)
+        for i in range(n_motors):
+            f = f"output[{i}]"
+            if f in act0.data:
+                _store(signals, warnings, f"act.out{i}", t, _normalise_actuator(np.asarray(act0.data[f], dtype=np.float64), lo, hi))
+        info["mapping_source"] = "channel_order_assumed"
+        info["actuator_outputs_instance"] = int(act0.multi_id)
+        info["pwm_range"] = (lo, hi)
+        warnings.append("actuator_mapping_assumed:no output function parameters; channel i taken as motor i+1")
+    return info
 
 
 def _normalise_actuator(raw: np.ndarray, pwm_min: float, pwm_max: float) -> np.ndarray:
@@ -784,6 +963,20 @@ DATAFLASH_MAP: List[Tuple[str, str, str, float]] = [
     ("vibe.z", "VIBE", "VibeZ", 1.0),
     ("cpu.load", "PM", "Load", 1.0 / 1000.0),  # PM.Load is per-mille
     ("mem.free", "PM", "MemFree", 1.0),
+    # Health spec 1.2. Field names are from ArduPilot's log-message docs and
+    # are NOT yet verified against a real .bin (none is available; see
+    # BACKLOG.md). BAT.Volt is ArduPilot's unfiltered pack voltage; CurrTot
+    # is mAh drawn. VIBE.Clip0-2 are cumulative clipping counters.
+    # ArduPilot has no cell-count parameter, so per-cell power features need
+    # the drone's stored battery_cells later; until then they return
+    # cell_count_unknown rather than guess.
+    ("batt.voltage_raw", "BAT", "Volt", 1.0),
+    ("batt.current_raw", "BAT", "Curr", 1.0),
+    ("batt.discharged_mah", "BAT", "CurrTot", 1.0),
+    ("imu.clip0", "VIBE", "Clip0", 1.0),
+    ("imu.clip1", "VIBE", "Clip1", 1.0),
+    ("imu.clip2", "VIBE", "Clip2", 1.0),
+    ("gps.sacc", "GPA", "SAcc", 1.0),
 ]
 
 # Position/velocity come from the EKF messages, which differ by EKF
@@ -888,37 +1081,52 @@ def parse_dataflash(path: str) -> ParsedLog:
             _store(signals, warnings, key, t, np.asarray(bucket[fname], dtype=np.float64))
         break
 
+    # Health spec A-1: every motor, by motor number. ArduPilot maps channels to
+    # functions with SERVO<n>_FUNCTION (33..40 = Motor 1..8, 82..85 = Motor
+    # 9..12) and limits each channel with SERVO<n>_MIN/MAX.
     pwm_min = float(params.get("RC1_MIN", DEFAULT_PWM_MIN))
     pwm_max = float(params.get("RC1_MAX", DEFAULT_PWM_MAX))
+    motor_info: Dict[str, object] = {}
     rcou = collected.get("RCOU")
     if rcou:
         t = times_for("RCOU")
-        for i in range(4):
-            fname = f"C{i + 1}"
-            if fname not in rcou:
+        mapping = {}
+        for ch in range(1, 17):
+            fn = params.get(f"SERVO{ch}_FUNCTION")
+            if fn is None:
                 continue
-            raw = np.asarray(rcou[fname], dtype=np.float64)
-            _store(signals, warnings, f"act.out{i}", t, _normalise_actuator(raw, pwm_min, pwm_max))
-        # Same truncation-visibility fix as the ULog path above: spec 5.2's
-        # schema is act.out[0..3], unchanged. Whether ArduPilot's RCOU
-        # message is fixed-width like PX4's actuator_outputs (padding, not
-        # absence, for unused channels) has not been verified against a
-        # real hex/octo DataFlash log -- no real one is available yet
-        # (see BACKLOG.md's "Blocked -- needs a real .ulg" section, which
-        # applies equally to a real ArduPilot .bin). The nonzero-value
-        # heuristic is used rather than field presence because it is
-        # correct under EITHER struct layout, whereas presence-counting
-        # would silently under-report if RCOU turns out to be fixed-width
-        # the same way actuator_outputs is.
-        rcou_indices = sorted(
-            int(k[1:]) for k in rcou if k != "_t" and k.startswith("C") and k[1:].isdigit()
-        )
-        n_actual = sum(1 for i in rcou_indices if np.any(np.asarray(rcou[f"C{i}"]) != 0))
-        if n_actual > 4:
-            warnings.append(
-                f"actuator_outputs_truncated:total={n_actual},captured=4,"
-                f"missing={n_actual - 4},source=nonzero_output_heuristic"
-            )
+            fn = int(fn)
+            if 33 <= fn <= 40:
+                mapping[fn - 33] = ch
+            elif 82 <= fn <= 85:
+                mapping[fn - 82 + 8] = ch
+        ranges = []
+        if mapping:
+            for motor, ch in sorted(mapping.items()):
+                fname = f"C{ch}"
+                if fname not in rcou:
+                    continue
+                lo = float(params.get(f"SERVO{ch}_MIN", pwm_min))
+                hi = float(params.get(f"SERVO{ch}_MAX", pwm_max))
+                ranges.append((lo, hi))
+                _store(signals, warnings, f"act.out{motor}", t,
+                       _normalise_actuator(np.asarray(rcou[fname], dtype=np.float64), lo, hi))
+            motor_info = {"motor_count": len(mapping), "motor_count_source": "SERVOn_FUNCTION",
+                          "mapping_source": "output_functions",
+                          "channel_of_motor": {m: f"SERVO{c}" for m, c in sorted(mapping.items())}}
+        else:
+            # Unverified layout: count channels that ever move, take them in order.
+            rcou_indices = sorted(int(k[1:]) for k in rcou if k != "_t" and k.startswith("C") and k[1:].isdigit())
+            active = [i for i in rcou_indices if np.any(np.asarray(rcou[f"C{i}"]) != 0)]
+            for motor, ch in enumerate(active):
+                _store(signals, warnings, f"act.out{motor}", t,
+                       _normalise_actuator(np.asarray(rcou[f"C{ch}"], dtype=np.float64), pwm_min, pwm_max))
+            ranges.append((pwm_min, pwm_max))
+            motor_info = {"motor_count": len(active), "motor_count_source": "nonzero_output_heuristic",
+                          "mapping_source": "channel_order_assumed"}
+            warnings.append("actuator_mapping_assumed:no SERVOn_FUNCTION parameters; active channels taken in order")
+        if ranges:
+            pwm_min, pwm_max = min(r[0] for r in ranges), max(r[1] for r in ranges)
 
     if not signals:
         raise EmptyLogError(f"{os.path.basename(path)} contains no usable telemetry")
@@ -942,7 +1150,7 @@ def parse_dataflash(path: str) -> ParsedLog:
         sim_evidence=sim_evidence,
         actuator_pwm_range=(pwm_min, pwm_max),
     )
-    return ParsedLog(signals=signals, params=params, meta=meta, warnings=warnings)
+    return ParsedLog(signals=signals, params=params, meta=meta, warnings=warnings, motor_info=motor_info)
 
 
 # ---------------------------------------------------------------------------
