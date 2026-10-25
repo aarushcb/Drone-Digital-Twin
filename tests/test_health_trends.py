@@ -43,7 +43,19 @@ def test_drift_fires_while_every_report_stays_calm():
     drift = [c for c in s["callouts"] if c["kind"] == "drift"]
     assert drift and "crept up from 50% to" in drift[0]["text"], s["callouts"]
     assert s["latest_delta"]["figure"] == "+6%"
+    # The latest flight's own score is calm (fine), but the pill sits next to
+    # "has crept up", so it may not read greener than "watch".
+    assert s["latest_delta"]["score"] >= 85 and s["latest_delta"]["band"] == "watch"
     print(f"PASS: every per-flight report calm, yet Trends says \"{drift[0]['text']}\"")
+
+
+def test_pill_band_is_never_greener_than_its_callouts():
+    assert T.pill_band(95.0, []) == "fine"
+    assert T.pill_band(95.0, [{"kind": "drift"}]) == "watch"
+    assert T.pill_band(60.0, [{"kind": "step"}]) == "off"        # already worse: unchanged
+    assert T.pill_band(None, [{"kind": "guide"}]) == "watch"
+    assert T.pill_band(None, []) is None
+    print("PASS: pill band = the score's band, floored at 'watch' by any Step/Drift/Guide callout")
 
 
 def test_step_fires_on_three_flights_outside_the_band():

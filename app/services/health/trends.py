@@ -35,6 +35,8 @@ DRIFT_FLIGHTS = 5         # spec §4.4
 GUIDE_FLIGHTS = 3         # spec §4.4
 BAND_SPREADS = 2.0        # reference band = median ± 2 × spread
 MIN_SPAN_FLOORS = 4.0     # vertical scale at least 4 × sigma_floor wide
+SEVERITY = ("fine", "watch", "off", "bad")
+CALLOUT_FLOOR = "watch"   # spec §4.4: a callout on a feature makes its pill at least "watch"
 
 CARDS = (
     ("vibration", "Vibration", ("vib.metric_p50", "vib.imbalance")),
@@ -94,6 +96,19 @@ def _guides(key: str, autopilot: str) -> List[dict]:
     if norm.bad_edge is not None:
         out.append({"value": norm.bad_edge, "kind": "bad_edge", "label": f"{owner} guide", "source": norm.source})
     return out
+
+
+def pill_band(score: Optional[float], callouts: Sequence[dict]) -> Optional[str]:
+    """The latest-vs-reference pill's colour (spec §4.4): the latest flight's
+    own score band, but never greener than the worst thing said about the
+    feature on the same screen. The score judges this flight against the
+    rolling baseline, which climbs with a slow drift, so on its own it can be
+    "fine" right next to "has crept up"; any Step, Drift or Guide callout on
+    the feature therefore lifts it to at least "watch"."""
+    band = None if score is None else N.band_status(score)
+    if callouts:
+        band = max(band or CALLOUT_FLOOR, CALLOUT_FLOOR, key=SEVERITY.index)
+    return band
 
 
 def _harmful(key: str, v: float, edge: float) -> bool:
@@ -198,7 +213,7 @@ def _series(key, pack, per_pack, flights, reports, feat, events, autopilot) -> O
         shown = F.figure(abs(d), F.DISPLAY[key])
         sign = "±" if float(F._num(abs(d), F.DISPLAY[key])) == 0 else ("+" if d > 0 else "−")
         delta = {"value": round(d, 6), "figure": sign + shown,
-                 "score": latest["score"], "vs": "reference"}
+                 "score": latest["score"], "band": pill_band(latest["score"], callouts), "vs": "reference"}
     floor = max(B.SIGMA_FLOOR.get(key, 0.0),
                 B.RELATIVE_FLOOR.get(key, 0.0) * abs(ref.median if ref is not None else latest["value"]))
     annotation = None
