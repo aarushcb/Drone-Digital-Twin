@@ -166,9 +166,11 @@ def test_reference_freezes_while_rolling_follows_drift():
 
 def test_modes_and_groups():
     assert [B.mode_for(n) for n in range(7)] == ["absolute"] * 3 + ["blended"] * 2 + ["personal"] * 2
-    assert B.baseline_group("pwr.r_cell", 3, 7) == "pack:7"
+    assert B.baseline_group("pwr.r_cell", None, 7) == "pack:7"
+    assert B.baseline_group("pwr.r_cell", 3, 7) == "pack:7/epoch:3"
     assert B.baseline_group("vib.metric_p50", 3, 7) == "epoch:3"
-    assert B.baseline_group("pwr.sag_hover", 3, None) == "pack:unknown"
+    assert B.baseline_group("vib.metric_p50", None, 7) == "epoch:initial"
+    assert B.baseline_group("pwr.sag_hover", None, None) == "pack:unknown"
     print("PASS: 0-2 absolute, 3-4 blended, 5+ personal; power features grouped per pack")
 
 

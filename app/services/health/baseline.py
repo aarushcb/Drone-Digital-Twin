@@ -82,12 +82,17 @@ DIRECTION: Dict[str, str] = {
 NOT_BASELINED = {"act.pattern", "act.mean", "pwr.v_cell_min"}
 
 
-def baseline_group(feature_key: str, epoch_id: int, pack_id: Optional[int]) -> str:
-    """Power features keep one baseline per battery pack (spec §2.4);
-    everything else is per configuration epoch."""
+def baseline_group(feature_key: str, epoch_id: Optional[int], pack_id: Optional[int]) -> str:
+    """Spec §2.4. `epoch_id` is the feature's own epoch: the latest change
+    that reset this feature (epochs.feature_epoch), None for the drone's
+    initial epoch. Power features also keep one baseline per battery pack, and
+    a change that resets them (props reset pwr.sag_hover, a frame change all
+    of pwr.*) starts a new group within that pack."""
+    epoch = "initial" if epoch_id is None else str(epoch_id)
     if feature_key.startswith("pwr."):
-        return f"pack:{pack_id}" if pack_id is not None else "pack:unknown"
-    return f"epoch:{epoch_id}"
+        pack = "unknown" if pack_id is None else str(pack_id)
+        return f"pack:{pack}" if epoch_id is None else f"pack:{pack}/epoch:{epoch}"
+    return f"epoch:{epoch}"
 
 
 def mode_for(n_admitted: int) -> str:
