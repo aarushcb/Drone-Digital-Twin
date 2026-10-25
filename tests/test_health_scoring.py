@@ -130,7 +130,7 @@ def test_declared_prop_change_absorbs_a_step_without_findings():
         assert not [f for f in r["findings"] if f["key"] == "act.hover"], r["findings"]
         assert not r["change_prompts"]
     hov = fkey(reps[9], "act.hover")
-    assert hov["n"] == 4 and hov["baseline"]["group"] == "epoch:0"
+    assert hov["n"] == 4 and hov["baseline"]["group"] == "epoch:user-7-props"
     print(f"PASS: hover 0.50 -> 0.60 after a declared prop change: no finding, no prompt; new baseline "
           f"(group {hov['baseline']['group']}, n {hov['n']})")
 
@@ -237,6 +237,23 @@ def test_overall_needs_four_subsystems():
     reps = R.analyse(history(5, overrides_at={i: gone for i in range(5)}))
     assert reps[4]["subsystems_scored"] == 3 and reps[4]["overall_score"] is None
     print("PASS: 3 of 5 subsystems scored -> overall null (spec §4.2)")
+
+
+def test_overall_band_cap():
+    """Spec §4.2 cap: never better than one band above the worst scored
+    feature. Worst 'off' -> at most 84 ('watch'); worst 'bad' -> at most 69."""
+    reps = R.analyse(history(6, overrides_at={5: {"act.hover": 0.565}}))   # one feature ~65, rest healthy
+    r = reps[5]
+    cap = r["overall_cap"]
+    worst = fkey(r, cap["worst_feature"])
+    assert 50 <= worst["score"] < 70 and cap["worst_band"] == "off"
+    assert cap["uncapped"] > 84 and cap["applied"] and r["overall_score"] == 84.0 and r["score_band"] == "watch"
+    bad = R.analyse(history(6, overrides_at={5: {"act.hover": 0.60}}))[5]
+    assert bad["overall_cap"]["worst_band"] == "bad" and bad["overall_score"] <= 69.0 and bad["score_band"] == "off"
+    clean = R.analyse(history(6))[5]["overall_cap"]
+    assert clean["applied"] is False and clean["ceiling"] is None
+    print(f"PASS: worst feature {worst['score']} (off) caps overall {cap['uncapped']} -> 84.0 (watch); worst bad -> "
+          f"{bad['overall_score']} (off); healthy drone uncapped")
 
 
 def test_definitional_raises_finding_without_scoring():

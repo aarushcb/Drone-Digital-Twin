@@ -71,8 +71,11 @@ def analyse(flights: Sequence[FlightInput], declared: Sequence[E.ConfigEvent] = 
         _enrich_spread(fmap)
         feats_by_flight.append(fmap)
 
-    groups = [{k: B.baseline_group(k, E.feature_epoch(k, i, events), fl.pack_id) for k, *_ in FEATURE_CATALOGUE}
-              for i, fl in enumerate(flights)]
+    def epoch_key(idx: Optional[int]) -> Optional[str]:
+        return None if idx is None else events[idx].key(flights[events[idx].flight_index].flight_id)
+
+    groups = [{k: B.baseline_group(k, epoch_key(E.feature_epoch(k, i, events)), fl.pack_id)
+               for k, *_ in FEATURE_CATALOGUE} for i, fl in enumerate(flights)]
     return [_report(i, flights, feats_by_flight, groups, events) for i in range(len(flights))]
 
 
@@ -99,6 +102,7 @@ def _report(i, flights, feats_by_flight, groups, events) -> dict:
     by_key = {fs.key: fs for fs in scores}
     epoch_idx = E.latest_epoch(i, events)
     epoch_start = 0 if epoch_idx is None else events[epoch_idx].flight_index
+    epoch_key = None if epoch_idx is None else events[epoch_idx].key(flights[epoch_start].flight_id)
     n_epoch = sum(1 for j in range(epoch_start, i + 1) if flights[j].window.qualified)
     cold_start = roll.overall is None and n_epoch <= 2
     checks = S.build_checks(by_key, fl.autopilot) if cold_start else None
@@ -115,7 +119,7 @@ def _report(i, flights, feats_by_flight, groups, events) -> dict:
     report = {
         "schema_version": SCHEMA_VERSION,
         "run": {"flight_id": fl.flight_id, "flight_number": i + 1, "pack_id": fl.pack_id,
-                "epoch_id": epoch_idx, "autopilot": fl.autopilot},
+                "epoch_id": epoch_key, "autopilot": fl.autopilot},
         "real_log_meta": fl.log_meta,
         "flight_window": {"qualified": w.qualified, "reasons": w.reasons,
                           "airborne_start_s": None if w.airborne_start_us is None else round(w.airborne_start_us / 1e6, 2),
@@ -129,12 +133,14 @@ def _report(i, flights, feats_by_flight, groups, events) -> dict:
         "score_band": roll.score_band,
         "subsystem_scores": roll.subsystem_scores,
         "subsystems_scored": roll.scored_subsystems,
-        "baseline": {"epoch_id": epoch_idx, "epoch_started_flight": epoch_start + 1, "qualifying_flights": n_epoch,
+        "overall_cap": roll.overall_cap,
+        "baseline": {"epoch_id": epoch_key, "epoch_started_flight": epoch_start + 1, "qualifying_flights": n_epoch,
                      "pack_id": fl.pack_id,
                      "mode_summary": {m: sum(1 for fs in scores if fs.status == "scored" and fs.mode == m)
                                       for m in ("absolute", "blended", "personal")}},
         "param_diff": [c for e in new_events if e.source == "params" for c in e.detail.get("changes", [])],
-        "epoch_events": [{"flight_number": e.flight_index + 1, "change_type": e.change_type, "source": e.source,
+        "epoch_events": [{"flight_number": e.flight_index + 1, "epoch_id": e.key(fl.flight_id),
+                          "change_type": e.change_type, "source": e.source,
                           "note": e.note, "features_reset": sorted(e.reset_features)} for e in new_events],
         "features": [_feature_json(fs) for fs in scores],
         "findings": [f.to_json() for f in findings],
@@ -162,7 +168,7 @@ def _feature_json(fs: S.FeatureScore) -> dict:
     f = fs.feature
     return {
         "key": f.key, "subsystem": f.subsystem, "value": _r(f.value, 6), "label": f.label, "unit": f.unit,
-        "tier": f.tier, "valid": f.valid, "reason": f.reason, "status": fs.status,
+        "tier": f.tier, "valid": f.valid, "reason": f.reason, "status": fs.status, "group": fs.group,
         "unscored_reason": fs.unscored_reason, "mode": fs.mode, "basis": fs.basis, "n": fs.n,
         "baseline": _baseline_json(fs.rolling, fs.group), "reference": _baseline_json(fs.reference, fs.group),
         "z": _r(fs.z, 3), "score_baseline": _r(fs.s_baseline, 1),

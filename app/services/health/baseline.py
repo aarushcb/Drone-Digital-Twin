@@ -96,7 +96,7 @@ DIRECTION: Dict[str, str] = {
 NOT_BASELINED = {"act.pattern", "act.mean", "pwr.v_cell_min"}
 
 
-def baseline_group(feature_key: str, epoch_id: Optional[int], pack_id: Optional[int]) -> str:
+def baseline_group(feature_key: str, epoch_id: Optional[object], pack_id: Optional[int]) -> str:
     """Spec §2.4. `epoch_id` is the feature's own epoch: the latest change
     that reset this feature (epochs.feature_epoch), None for the drone's
     initial epoch. Power features also keep one baseline per battery pack, and

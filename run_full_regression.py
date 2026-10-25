@@ -44,6 +44,16 @@ class CheckFailure(AssertionError):
     """Raised inside a check function to report a specific, readable failure."""
 
 
+class CheckSkipped(Exception):
+    """Raised when a check can't run here (e.g. the feature isn't deployed on
+    this server yet). Reported as SKIP; never counted as a pass."""
+
+
+HEALTH_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "tests", "fixtures", "reality_gap", "real", "px4_777ed799.ulg")
+HEALTH_POLL_TIMEOUT_S = 240.0
+
+
 RETRY_ATTEMPTS = 3
 RETRY_DELAY_S = 3.0
 
@@ -579,6 +589,40 @@ def check_fault_detection(ctx: Ctx):
           f"run_length={fault['num_consecutive_points']} points")
 
 
+def check_health_flight_upload(ctx: Ctx):
+    """D1 health (spec §9 step 10): upload the real PX4 log, poll the job,
+    fetch the report. Skips until the health API is deployed (and Neon has
+    been migrated), and when the gitignored fixture is absent. The flight is
+    removed with the test drone (ON DELETE CASCADE)."""
+    if not os.path.exists(HEALTH_LOG_PATH):
+        raise CheckSkipped("real fixture px4_777ed799.ulg absent")
+    r = ctx.get(f"/drones/{ctx.drone_id}/flights")
+    if r.status_code == 404 and r.json().get("detail") == "Not Found":
+        raise CheckSkipped("health API not deployed on this server")
+    expect_status(r, 200, "GET flights")
+    with open(HEALTH_LOG_PATH, "rb") as fh:
+        r = ctx.client.post(f"/drones/{ctx.drone_id}/flights", headers=ctx.headers,
+                            files={"file": ("px4_777ed799.ulg", fh)}, timeout=300.0)
+    expect_status(r, 202, "POST flights (upload)")
+    fid = r.json()["flight_id"]
+    t0 = time.time()
+    while True:
+        r = ctx.get(f"/drones/{ctx.drone_id}/flights/{fid}")
+        expect_status(r, 200, "GET flight (poll)")
+        f = r.json()
+        if f["status"] in ("done", "failed"):
+            break
+        if time.time() - t0 > HEALTH_POLL_TIMEOUT_S:
+            raise CheckFailure(f"flight still {f['status']} after {HEALTH_POLL_TIMEOUT_S:.0f}s")
+        time.sleep(2.0)
+    if f["status"] != "done":
+        raise CheckFailure(f"analysis failed: {f['error']}")
+    rep = f["report"]
+    if rep["schema_version"] != "d1.health.1" or rep["overall_score"] is not None:
+        raise CheckFailure(f"unexpected flight-1 report: schema {rep['schema_version']}, overall {rep['overall_score']}")
+    print(f"  analysed in ~{time.time() - t0:.0f}s of polling: \"{rep['verdict']['headline']}\"")
+
+
 CHECKS = [
     ("Auth + drone setup", check_auth_and_drone_setup),
     ("Drone CRUD", check_drone_crud),
@@ -596,6 +640,7 @@ CHECKS = [
     ("Trajectory smoothing", check_trajectory_smoothing),
     ("Frame comparison (incl. fixed-wing)", check_frame_comparison),
     ("Fault detection", check_fault_detection),
+    ("D1 health flight upload", check_health_flight_upload),
 ]
 
 
@@ -620,6 +665,9 @@ def main() -> int:
                 fn(ctx)
                 results.append((name, True, None))
                 print(f"  PASS: {name}")
+            except CheckSkipped as e:
+                results.append((name, None, str(e)))
+                print(f"  SKIP: {name} -- {e}")
             except CheckFailure as e:
                 results.append((name, False, str(e)))
                 print(f"  FAIL: {name} -- {e}")
@@ -652,12 +700,14 @@ def main() -> int:
     print("SUMMARY")
     print("=" * 70)
     passed = sum(1 for _, ok, _ in results if ok)
+    skipped = sum(1 for _, ok, _ in results if ok is None)
+    ran = len(results) - skipped
     for name, ok, detail in results:
-        status = "PASS" if ok else "FAIL"
+        status = "SKIP" if ok is None else ("PASS" if ok else "FAIL")
         print(f"  [{status}] {name}" + (f"  -- {detail}" if detail else ""))
-    print(f"\n{passed}/{len(results)} checks passed.")
+    print(f"\n{passed}/{ran} checks passed." + (f" {skipped} skipped." if skipped else ""))
 
-    return 0 if passed == len(results) else 1
+    return 0 if passed == ran else 1
 
 
 if __name__ == "__main__":

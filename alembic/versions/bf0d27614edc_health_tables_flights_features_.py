@@ -2,7 +2,7 @@
 
 Revision ID: bf0d27614edc
 Revises: bf0e9bc5cbb9
-Create Date: 2026-10-25 14:06:40.044138
+Create Date: 2026-10-25 16:28:08.509979
 
 """
 from typing import Sequence, Union
@@ -76,12 +76,17 @@ def upgrade() -> None:
     sa.Column('uploaded_at', sa.DateTime(), nullable=False),
     sa.Column('log_filename', sa.String(), nullable=False),
     sa.Column('log_sha256', sa.String(length=64), nullable=False),
-    sa.Column('autopilot', sa.String(), nullable=False),
+    sa.Column('autopilot', sa.String(), nullable=True),
     sa.Column('firmware_version', sa.String(), nullable=True),
     sa.Column('airframe', sa.String(), nullable=True),
-    sa.Column('qualified', sa.Boolean(), nullable=False),
+    sa.Column('status', sa.String(), nullable=False),
+    sa.Column('error', sa.Text(), nullable=True),
+    sa.Column('processed_at', sa.DateTime(), nullable=True),
+    sa.Column('qualified', sa.Boolean(), nullable=True),
     sa.Column('qualify_reasons', sa.JSON(), nullable=True),
     sa.Column('airborne_s', sa.Float(), nullable=True),
+    sa.Column('airborne_start_s', sa.Float(), nullable=True),
+    sa.Column('airborne_end_s', sa.Float(), nullable=True),
     sa.Column('steady_s', sa.Float(), nullable=True),
     sa.Column('airborne_source', sa.String(), nullable=True),
     sa.Column('phase_seconds', sa.JSON(), nullable=True),
@@ -89,6 +94,7 @@ def upgrade() -> None:
     sa.Column('motor_info', sa.JSON(), nullable=True),
     sa.Column('watched_params', sa.JSON(), nullable=True),
     sa.Column('warnings', sa.JSON(), nullable=True),
+    sa.Column('log_meta', sa.JSON(), nullable=True),
     sa.Column('takeoff_mass_kg', sa.Float(), nullable=True),
     sa.ForeignKeyConstraint(['drone_id'], ['drones.id'], ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['epoch_id'], ['config_epochs.id'], ondelete='CASCADE'),

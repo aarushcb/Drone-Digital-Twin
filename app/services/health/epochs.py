@@ -74,6 +74,13 @@ class ConfigEvent:
     note: str = ""
     features: Optional[Set[str]] = None   # inferred_confirmed: exactly the prompted features
     detail: Dict[str, object] = field(default_factory=dict)
+    epoch_id: Optional[int] = None        # config_epochs.id when persisted; None for detected-from-params
+
+    def key(self, flight_id: int) -> str:
+        """Stable baseline-group name: the database id when persisted, else
+        derived from the flight it starts at, so inserting an earlier event
+        never renames the groups of later ones."""
+        return str(self.epoch_id) if self.epoch_id is not None else f"{self.source}-{flight_id}-{self.change_type}"
 
     @property
     def reset_features(self) -> Set[str]:

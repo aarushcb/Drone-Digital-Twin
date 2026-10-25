@@ -26,6 +26,11 @@ from .features import ATT, MOT, POS, PWR, VIB, Feature
 SUBSYSTEMS = (ATT, POS, VIB, MOT, PWR)
 DISPLAY_SUBSYSTEM = {ATT: "Attitude & control", POS: "Position", VIB: "Vibration", MOT: "Motors", PWR: "Power"}
 OVERALL_MIN_SUBSYSTEMS = 4      # spec §4.2
+# Spec §4.2 band cap: the overall never reads better than one band above the
+# worst scored feature. Worst "bad" -> at most "off"; worst "off" -> at most
+# "watch". Ceilings are the top whole number of the band above, as specified
+# (worst 65 -> overall at most 84).
+OVERALL_CAP_BY_WORST_BAND = {"bad": 69.0, "off": 84.0}
 ABSOLUTE_BAD_CAP = 49.0         # spec §3.3
 SCORED_FROM_N = 3               # spec §3.3: baseline-only features score from n = 3
 CONFIDENCE_HIGH_N = 10          # spec §5.2
@@ -194,6 +199,7 @@ class Rollup:
     score_band: Optional[str]
     scored_subsystems: int
     coverage: Dict[str, int] = field(default_factory=dict)
+    overall_cap: Optional[dict] = None
 
 
 def rollup(scores: Sequence[FeatureScore]) -> Rollup:
@@ -205,10 +211,20 @@ def rollup(scores: Sequence[FeatureScore]) -> Rollup:
     scored = [v for v in subs.values() if v is not None]
     overall = combine(scored) if len(scored) >= OVERALL_MIN_SUBSYSTEMS else None
     overall = None if overall is None else round(overall, 1)
+    cap = None
+    if overall is not None:
+        worst = min((fs for fs in scores if fs.status == "scored"), key=lambda fs: fs.score)
+        band = N.band_status(worst.score)
+        ceiling = OVERALL_CAP_BY_WORST_BAND.get(band)
+        applied = ceiling is not None and overall > ceiling
+        cap = {"applied": applied, "uncapped": overall, "ceiling": ceiling, "worst_feature": worst.key,
+               "worst_score": worst.score, "worst_band": band}
+        if applied:
+            overall = ceiling
     coverage = {"features_scored": sum(fs.status == "scored" for fs in scores),
                 "features_valid": sum(fs.feature.valid for fs in scores),
                 "features_total": len(scores)}
-    return Rollup(subs, overall, None if overall is None else N.band_status(overall), len(scored), coverage)
+    return Rollup(subs, overall, None if overall is None else N.band_status(overall), len(scored), coverage, cap)
 
 
 # ---------------------------------------------------------------- flight-one checklist (spec §3.4)

@@ -3,12 +3,13 @@ D1 Health tables -- health spec §7 and §9 step 6.
 
 Added via Alembic (CLAUDE.md rule 2), never by create_all on Neon.
 
-DELIBERATELY NOT IMPORTED BY main.py: main.py runs Base.metadata.create_all()
-on startup, which creates any table whose model has been imported. If these
-models were imported on the startup path before the migration has been
-applied to Neon, the next deploy would create the tables itself, bypassing
-Alembic, and `alembic upgrade head` would then fail on "table exists".
-Only alembic/env.py imports this module until the migration is applied.
+EXCLUDED FROM create_all: main.py's startup create_all() is restricted to the
+pre-health tables (HEALTH_TABLES below are left out). The health API imports
+these models on the startup path, and an unrestricted create_all would create
+them on Neon itself on the next deploy, bypassing Alembic -- after which
+`alembic upgrade head` fails on "table exists". With the restriction, a
+deploy that reaches Neon before the migration fails loudly on the health
+endpoints instead of silently skipping the migration.
 
 Deleting a drone cascades through every table here at the database level
 (ondelete="CASCADE"); no ORM relationship on Drone is needed.
@@ -72,13 +73,22 @@ class Flight(Base):
     uploaded_at = Column(DateTime, default=_now, nullable=False)
     log_filename = Column(String, nullable=False)
     log_sha256 = Column(String(64), nullable=False)        # spec 9 case 14: same file twice
-    autopilot = Column(String, nullable=False)             # px4 | ardupilot; baselines never mix them (spec §6.12)
+    autopilot = Column(String, nullable=True)              # px4 | ardupilot; null until parsed. Baselines never mix them (§6.12)
     firmware_version = Column(String, nullable=True)
     airframe = Column(String, nullable=True)
 
-    qualified = Column(Boolean, nullable=False)
+    # Upload job (step 10): queued -> processing -> done | failed. Parsing a
+    # 25 MB log is seconds of CPU, so the upload returns at once and the app
+    # polls; `error` says why a job failed, including a restart mid-job.
+    status = Column(String, nullable=False, default="queued")
+    error = Column(Text, nullable=True)
+    processed_at = Column(DateTime, nullable=True)
+
+    qualified = Column(Boolean, nullable=True)             # null until parsed
     qualify_reasons = Column(JSON, nullable=True)
     airborne_s = Column(Float, nullable=True)
+    airborne_start_s = Column(Float, nullable=True)        # log-relative seconds
+    airborne_end_s = Column(Float, nullable=True)
     steady_s = Column(Float, nullable=True)
     airborne_source = Column(String, nullable=True)        # land_detector | altitude_threshold | none
     phase_seconds = Column(JSON, nullable=True)
@@ -86,6 +96,7 @@ class Flight(Base):
     motor_info = Column(JSON, nullable=True)               # motor count, mapping source
     watched_params = Column(JSON, nullable=True)           # spec §2.4 epoch-detection parameters
     warnings = Column(JSON, nullable=True)
+    log_meta = Column(JSON, nullable=True)                 # the report's real_log_meta
     takeoff_mass_kg = Column(Float, nullable=True)         # optional, unscored context (spec §7)
 
 
@@ -129,3 +140,6 @@ class FeatureBaseline(Base):
     n = Column(Integer, nullable=False)
     flight_ids = Column(JSON, nullable=False)
     computed_at = Column(DateTime, default=_now, nullable=False)
+
+
+HEALTH_TABLES = {"packs", "config_epochs", "flights", "flight_features", "feature_baselines"}
