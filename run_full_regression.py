@@ -6,10 +6,10 @@ Render backend -- exercises every backend-provable feature through the
 real HTTP API (not local function calls, not TestClient), the same way
 the Flutter app or a manual curl session actually would. Registers a
 fresh throwaway user and creates ONE disposable test drone at the start,
-runs every check against it, and deletes the drone (cascading away all
-its telemetry/scene objects) in a `finally` block -- repeated runs never
-leave the real database littered with test data, even if a check fails
-partway through.
+runs every check against it, and deletes the whole throwaway account
+(DELETE /auth/account, taking its drone, telemetry, flights and the rest)
+in a `finally` block -- repeated runs never leave the real database
+littered with test data, even if a check fails partway through.
 
 Run with: python3 run_full_regression.py
 Needs only httpx, which is already a project dependency (requirements.txt).
@@ -100,6 +100,7 @@ class Ctx:
         self.client = httpx.Client(base_url=base_url, timeout=REQUEST_TIMEOUT)
         self.token: str | None = None
         self.drone_id: int | None = None
+        self.password: str | None = None
 
     @property
     def headers(self) -> dict:
@@ -144,6 +145,7 @@ def check_auth_and_drone_setup(ctx: Ctx):
 
     r = _with_retry(lambda: ctx.client.post("/auth/register", json={"email": email, "password": password}))
     expect_status(r, 201, "POST /auth/register")
+    ctx.password = password
 
     r = _with_retry(lambda: ctx.client.post(
         "/auth/login",
@@ -687,13 +689,21 @@ def main() -> int:
                 print("\nAuth + drone setup failed -- skipping all remaining checks (nothing else can run without it).")
                 break
     finally:
-        if ctx.drone_id is not None:
-            print(f"\nCleaning up: deleting test drone {ctx.drone_id} ...")
+        # Delete the whole throwaway account (its drones, telemetry, flights
+        # and the rest go with it). Older servers without DELETE
+        # /auth/account get the previous behaviour: just the drone.
+        if ctx.token is not None and ctx.password is not None:
+            print("\nCleaning up: deleting the throwaway account ...")
             try:
-                r = ctx.delete(f"/drones/{ctx.drone_id}")
-                print(f"  delete returned HTTP {r.status_code}")
+                r = _with_retry(lambda: ctx.client.request("DELETE", "/auth/account", headers=ctx.headers,
+                                                           json={"password": ctx.password}))
+                print(f"  account delete returned HTTP {r.status_code}"
+                      + (f": {r.json()['deleted']}" if r.status_code == 200 else ""))
+                if r.status_code in (404, 405) and ctx.drone_id is not None:
+                    r = ctx.delete(f"/drones/{ctx.drone_id}")
+                    print(f"  (no account deletion on this server) drone delete returned HTTP {r.status_code}")
             except httpx.HTTPError as e:
-                print(f"  WARNING: could not delete test drone {ctx.drone_id} -- clean it up manually: {e}")
+                print(f"  WARNING: could not delete the test account -- clean it up manually: {e}")
         ctx.client.close()
 
     print("\n" + "=" * 70)

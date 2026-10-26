@@ -26,6 +26,7 @@ from app.api.routes import router as drone_router
 from app.api.auth import router as auth_router
 from app.api.ws import router as ws_router
 from app.api.health import router as health_router
+from app.api.account_web import router as account_web_router
 
 # The health tables are Alembic-only (CLAUDE.md rule 2): create_all never
 # creates them, even though the health router imports their models. See
@@ -45,6 +46,7 @@ app.include_router(auth_router)
 app.include_router(drone_router)
 app.include_router(ws_router)
 app.include_router(health_router)
+app.include_router(account_web_router)
 
 
 @app.get("/")
