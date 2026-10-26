@@ -135,9 +135,12 @@ def test_real_websocket_reconnect_via_testclient():
 
     drone_id = client.post("/drones", json={"name": "WSQuad"}, headers=headers).json()["id"]
 
-    with client.websocket_connect(f"/ws/drones/{drone_id}/telemetry?token={token}") as ws1:
+    # The token goes in Sec-WebSocket-Protocol ("bearer", <token>), never the URL.
+    proto = ["bearer", token]
+    with client.websocket_connect(f"/ws/drones/{drone_id}/telemetry", subprotocols=proto) as ws1:
+        assert ws1.accepted_subprotocol == "bearer"  # the token itself is never echoed back
         # Second connection, same user, same drone -- exactly the bug scenario.
-        with client.websocket_connect(f"/ws/drones/{drone_id}/telemetry?token={token}") as ws2:
+        with client.websocket_connect(f"/ws/drones/{drone_id}/telemetry", subprotocols=proto) as ws2:
             # ws1 should have been closed server-side by now (the fix).
             try:
                 ws1.receive_text()
@@ -153,6 +156,16 @@ def test_real_websocket_reconnect_via_testclient():
             )
             message = ws2.receive_json()
             assert message["battery"] == 77.0
+
+    # A token in the URL is no longer accepted, and no token is refused.
+    from starlette.websockets import WebSocketDisconnect as _Gone
+    for url, kw in ((f"/ws/drones/{drone_id}/telemetry?token={token}", {}), (f"/ws/drones/{drone_id}/telemetry", {})):
+        try:
+            with client.websocket_connect(url, **kw) as ws:
+                ws.receive_text()
+            assert False, f"connection without a subprotocol token was accepted: {url}"
+        except _Gone:
+            pass
 
     if os.path.exists("test_broadcaster.db"):
         os.remove("test_broadcaster.db")

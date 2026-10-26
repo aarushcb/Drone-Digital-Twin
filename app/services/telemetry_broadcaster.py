@@ -60,7 +60,7 @@ class ConnectionManager:
         # matters).
         self.active_connections: Dict[int, List[Tuple[int, WebSocket]]] = {}
 
-    async def connect(self, drone_id: int, user_id: int, websocket: WebSocket):
+    async def connect(self, drone_id: int, user_id: int, websocket: WebSocket, subprotocol: str | None = None):
         existing = self.active_connections.setdefault(drone_id, [])
         for entry in list(existing):
             existing_user_id, existing_ws = entry
@@ -74,7 +74,9 @@ class ConnectionManager:
                     pass  # already gone -- fine, that's what we wanted anyway
                 existing.remove(entry)
 
-        await websocket.accept()
+        # Echo only the protocol name chosen during auth (e.g. "bearer"),
+        # never the token the client offered alongside it.
+        await (websocket.accept(subprotocol=subprotocol) if subprotocol else websocket.accept())
         existing.append((user_id, websocket))
 
     def disconnect(self, drone_id: int, websocket: WebSocket):
