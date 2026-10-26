@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DroneTwinLabs privacy policy</title>
+<meta name="description" content="What the DroneTwinLabs app collects, what it keeps, where it is stored, and how to delete it.">
+<!-- Built from assets/docs/privacy-policy.md in the drone_twin_app repo. No external fonts, scripts or
+     trackers: a privacy policy page shouldn't hand its readers' IP addresses to anyone. -->
+<style>
+  :root {
+    --paper: #FBF8F3; --surface: #FFFFFF; --outline: #E2DCCF;
+    --ink: #2B2A28; --ink-soft: #6F6B63;
+    --periwinkle: #C7CEEA; --mint: #B5EAD7; --peach: #FFDAC1; --butter: #FFF5BA; --coral: #FF9AA2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  header { border-bottom: 1px solid var(--outline); padding-bottom: 1.25rem; margin-bottom: 1.5rem; }
+  .brand { display: inline-flex; gap: 6px; margin-bottom: .9rem; }
+  .brand span { width: 14px; height: 14px; border-radius: 4px; border: 1px solid rgba(43,42,40,.12); }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .4rem; letter-spacing: -.01em; }
+  .updated { color: var(--ink-soft); margin: 0; font-size: .95rem; }
+  h2 {
+    font-size: 1.25rem; margin: 2.2rem 0 .6rem; padding-left: .7rem;
+    border-left: 4px solid var(--periwinkle);
+  }
+  h3 { font-size: 1rem; margin: 1.4rem 0 .3rem; }
+  p, li { margin: .4rem 0; }
+  ul { padding-left: 1.3rem; }
+  li > ul { margin: .2rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em;
+         background: var(--surface); border: 1px solid var(--outline); border-radius: 4px; padding: 0 .25em; }
+  a { color: var(--ink); text-decoration-color: var(--coral); text-decoration-thickness: 2px; text-underline-offset: 3px; }
+  .delete { background: var(--surface); border: 1px solid var(--outline); border-left: 4px solid var(--coral);
+            border-radius: 10px; padding: .4rem 1rem .6rem; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--outline); color: var(--ink-soft); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="brand" aria-hidden="true">
+    <span style="background:var(--periwinkle)"></span><span style="background:var(--mint)"></span><span style="background:var(--butter)"></span><span style="background:var(--peach)"></span><span style="background:var(--coral)"></span>
+  </div>
+  <h1>DroneTwinLabs privacy policy</h1>
+  <p class="updated">Last updated: <time datetime="2026-10-26">26 October 2026</time></p>
+</header>
+
+<p>DroneTwinLabs is a student tool for analysing your own drone's flight logs. This policy explains what the app collects, what it keeps, where it is stored, and how to delete it.</p>
+
+<h2>Who runs it</h2>
+<p>DroneTwinLabs is developed by an individual student developer. Contact: <a href="mailto:aarushcb.2005@gmail.com"><strong>aarushcb.2005@gmail.com</strong></a>.</p>
+
+<h2>What we collect</h2>
+
+<h3>Your account</h3>
+<ul>
+  <li>Your <strong>email address</strong> and a <strong>password</strong>. The password is never stored. Only a one-way bcrypt hash of it is kept, so nobody, including us, can read it.</li>
+</ul>
+
+<h3>Your drones</h3>
+<ul>
+  <li>What you enter about each drone: its <strong>name</strong>, and any specs you choose to fill in (model, frame type, mass, motor count and KV, propeller size, battery cells and capacity, maximum thrust and speed, wing area, lift-to-drag ratio).</li>
+  <li><strong>Battery packs</strong> you add: a name, and optionally cell count, capacity and serial number.</li>
+  <li><strong>Changes you log</strong> ("I changed something"): the change type and an optional free-text note.</li>
+  <li><strong>3D scene objects</strong> you place (obstacles, landing spots and so on).</li>
+</ul>
+
+<h3>Flight logs you upload for a health report (PX4 <code>.ulg</code>, ArduPilot <code>.bin</code>)</h3>
+<ul>
+  <li>The file is sent to our server, analysed, and then <strong>deleted</strong>. The raw log is never kept.</li>
+  <li>What we keep from it:
+    <ul>
+      <li>its file name and a fingerprint (SHA-256) used to spot duplicates</li>
+      <li>the date and time the flight started, if the log records one</li>
+      <li>the flight controller's hardware name and firmware version</li>
+      <li>the airframe type</li>
+      <li>a small set of flight-controller settings used to notice when you changed something (control gains, filter settings, rotor layout, battery settings)</li>
+      <li>how long the drone was airborne</li>
+      <li>the health measurements (26 per flight, such as vibration level, motor balance, hover throttle and pack resistance), with supporting detail for each (for example the average output of each motor), a list of which data streams the log contained, and any processing warnings</li>
+    </ul>
+  </li>
+  <li>What we <strong>do not</strong> keep from a health upload: the GPS track, positions or coordinates, or any of the raw sensor samples.</li>
+</ul>
+
+<h3>Telemetry logs you import for replay (the "Import MAVLink flight log" option on a drone)</h3>
+<ul>
+  <li>The file is deleted after reading, but the flight path extracted from it <strong>is stored</strong> for replay: a point every fraction of a second with <strong>GPS latitude and longitude</strong>, altitude, speed, attitude, battery level and flight state. This is a precise record of where your drone flew.</li>
+</ul>
+
+<h3>Live telemetry</h3>
+<ul>
+  <li>If you connect a drone or simulator to stream telemetry, the readings it sends (which can include GPS position) are stored the same way.</li>
+</ul>
+
+<h3>On your phone only</h3>
+<ul>
+  <li>Your sign-in token (in the phone's secure storage), which drone you last worked on, which of the two app cats was shown last, and a copy of your flight reports so they open offline. The cached reports are tied to your account: another account signed in on the same phone can't read them. Signing out or deleting your account removes them, and the remembered drone, from the phone.</li>
+</ul>
+
+<h3>Server logs</h3>
+<ul>
+  <li>Like most web services, our hosting provider records each request to the server (time, address requested, and the requesting IP address) in its logs, and keeps them for <strong>up to 7 days</strong>. Your sign-in token is never part of a logged address.</li>
+</ul>
+
+<h2>What we don't collect</h2>
+<ul>
+  <li>No advertising, analytics or crash-reporting services are built into the app.</li>
+  <li>The app never reads your phone's location. It asks for one permission only: internet access.</li>
+  <li>We don't sell your data or use it for advertising.</li>
+</ul>
+
+<h2>Weather lookups (a third-party service)</h2>
+<p>In the environment simulator you can look up a place to get its weather. When you do, the <strong>place name you type</strong>, and then the <strong>coordinates of the place you choose</strong>, are sent directly from your phone to <strong>Open-Meteo</strong> (<a href="https://open-meteo.com">open-meteo.com</a>), a free weather service, which sees your phone's IP address. Nothing from your account is sent with it. Open-Meteo's own privacy policy applies to those requests.</p>
+
+<h2>Where it is stored</h2>
+<ul>
+  <li><strong>Server:</strong> Render (render.com) runs the app's server, in its <strong>Singapore</strong> region.</li>
+  <li><strong>Database:</strong> Neon (neon.tech), on Amazon Web Services in the <strong>Singapore (ap-southeast-1)</strong> region.</li>
+  <li><strong>In transit:</strong> traffic between the app and the server uses HTTPS, and the server's connection to the database is encrypted (TLS).</li>
+</ul>
+
+<h2>Who we share it with</h2>
+<p>Nobody. Render and Neon store and process data only to run the service for us. The only data that leaves for anyone else is the weather lookup above, sent by your phone directly to Open-Meteo.</p>
+
+<h2>How long we keep it</h2>
+<p>Everything is kept until you delete it. There is no automatic expiry. Uploaded flight log files are the exception: each is deleted from the server as soon as it has been analysed.</p>
+<p>When you delete something, it is removed from the database immediately. Our database provider keeps a short history for disaster recovery (6 hours on our plan), so deleted data stops being recoverable from that history within <strong>6 hours</strong>.</p>
+
+<h2 id="delete">How to delete your data</h2>
+<div class="delete">
+<ul>
+  <li><strong>In the app:</strong> Settings, then Delete account. You'll be asked for your password.</li>
+  <li><strong>Without the app:</strong> visit <a href="https://drone-digital-twin-api.onrender.com/account/delete"><strong>drone-digital-twin-api.onrender.com/account/delete</strong></a> and sign in with your email and password.</li>
+  <li>Either way, the deletion takes everything at once: your account, every drone, its telemetry and scene objects, every flight and its report and measurements, your battery packs and logged changes. It happens immediately and cannot be undone.</li>
+  <li>You can also delete <strong>a single flight</strong> (from its report: the menu, then Delete this flight). Its report and measurements go, and your drone's learned normal is recalculated without it.</li>
+  <li>Or delete <strong>a single drone</strong>, with all its data, from the drone's menu.</li>
+</ul>
+</div>
+
+<h2>Children</h2>
+<p>DroneTwinLabs is made for engineering students and is not directed at children under 13. It has no age check. If you believe a child under 13 has created an account, contact us at the address above and we will delete it.</p>
+
+<h2>Changes to this policy</h2>
+<p>If this policy changes, the new version will be posted at the same address with a new date.</p>
+
+<footer>DroneTwinLabs · <a href="mailto:aarushcb.2005@gmail.com">aarushcb.2005@gmail.com</a></footer>
+</main>
+</body>
+</html>
