@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DroneTwinLabs terms of service</title>
+<meta name="description" content="The terms for using DroneTwinLabs, including what its flight health results do and do not mean.">
+<!-- Built from assets/docs/terms-of-service.md in the drone_twin_app repo (the app bundles the same
+     text as assets/content/terms-of-service.md). Change them together. Same rules as index.html:
+     no external fonts, scripts or trackers. -->
+<style>
+  :root {
+    --paper: #FBF8F3; --surface: #FFFFFF; --outline: #E2DCCF;
+    --ink: #2B2A28; --ink-soft: #6F6B63;
+    --periwinkle: #C7CEEA; --mint: #B5EAD7; --peach: #FFDAC1; --butter: #FFF5BA; --coral: #FF9AA2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 42rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+  header { border-bottom: 1px solid var(--outline); padding-bottom: 1.25rem; margin-bottom: 1.5rem; }
+  .brand { display: inline-flex; gap: 6px; margin-bottom: .9rem; }
+  .brand span { width: 14px; height: 14px; border-radius: 4px; border: 1px solid rgba(43,42,40,.12); }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .4rem; letter-spacing: -.01em; }
+  .updated { color: var(--ink-soft); margin: 0; font-size: .95rem; }
+  h2 {
+    font-size: 1.25rem; margin: 2.2rem 0 .6rem; padding-left: .7rem;
+    border-left: 4px solid var(--periwinkle);
+  }
+  h3 { font-size: 1rem; margin: 1.4rem 0 .3rem; }
+  p, li { margin: .4rem 0; }
+  ul { padding-left: 1.3rem; }
+  li > ul { margin: .2rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em;
+         background: var(--surface); border: 1px solid var(--outline); border-radius: 4px; padding: 0 .25em; }
+  a { color: var(--ink); text-decoration-color: var(--coral); text-decoration-thickness: 2px; text-underline-offset: 3px; }
+  .safety { background: var(--surface); border: 1px solid var(--outline); border-left: 4px solid var(--coral);
+            border-radius: 10px; padding: .4rem 1rem .6rem; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--outline); color: var(--ink-soft); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="brand" aria-hidden="true">
+    <span style="background:var(--periwinkle)"></span><span style="background:var(--mint)"></span><span style="background:var(--butter)"></span><span style="background:var(--peach)"></span><span style="background:var(--coral)"></span>
+  </div>
+  <h1>DroneTwinLabs terms of service</h1>
+  <p class="updated">Last updated: <time datetime="2026-10-26">26 October 2026</time></p>
+</header>
+
+<p>These terms are the agreement between you and the developer of DroneTwinLabs ("we", "us"). By creating an account or using the app, you agree to them. If you don't agree, don't use the app.</p>
+<h2 id="short">The short version</h2>
+<ul>
+  <li>DroneTwinLabs is an <strong>analysis tool, not an airworthiness assessment</strong>. A good score does not mean your drone is safe to fly.</li>
+  <li><strong>You</strong> are responsible for your own pre-flight checks and for following the aviation rules where you fly.</li>
+  <li>Findings are probabilistic. They <strong>can be wrong in both directions</strong>: a false alarm about a healthy drone, or no warning about a real problem.</li>
+  <li>Your flight logs stay yours.</li>
+  <li>The app is free and comes with no warranty. You can stop using it and delete your account at any time.</li>
+</ul>
+<h2 id="s1">1. What the app is, and what it is not</h2>
+<p>DroneTwinLabs reads the flight logs you upload (PX4 .ulg and ArduPilot .bin), takes measurements from them, and compares each flight with your drone's earlier flights, or with published PX4 and ArduPilot guidance until it has enough history. It reports what changed, where, and how confident it is.</p>
+<p><strong>It is not an airworthiness assessment, an inspection or a certification.</strong> Nothing in the app is a statement that a drone is safe to fly, fit for a purpose, or compliant with any regulation.</p>
+<ul>
+  <li><strong>A good score is not a safety clearance.</strong> A high health score means only that the measurements the app can take look like your drone's normal. Many faults don't show up in those measurements at all.</li>
+  <li><strong>A poor score is not a diagnosis.</strong> It means something measured has changed. The likely causes the app lists are suggestions to check, not findings of fact.</li>
+  <li><strong>Findings are probabilistic and can be wrong in both directions.</strong> The app compares measurements against statistical baselines. It can flag a healthy drone (a false alarm) and it can miss a real problem (a missed detection). Its confidence labels say how much history stands behind each finding, not how likely the drone is to fail.</li>
+  <li><strong>Early reads are weaker.</strong> Until your drone has about five flights in the same setup, findings are compared with general published guidance rather than your drone's own history.</li>
+</ul>
+<h2 id="s2">2. What the app cannot tell you</h2>
+<p>These are limits of the data and methods, not features waiting to be switched on. The app never claims any of them, and you shouldn't read them into its results:</p>
+<ul>
+  <li><strong>Remaining life</strong> of motors, props or the battery. There is no wear model to predict it from.</li>
+  <li><strong>Which exact part failed.</strong> A change can fit a prop, motor, ESC or bent arm. The app ranks likely causes; it doesn't diagnose.</li>
+  <li><strong>Battery state of health as a percentage, or remaining capacity.</strong> Internal resistance is a sign of ageing, not a capacity measurement.</li>
+  <li><strong>Rotor-frequency or blade-pass vibration on default logs.</strong> Default logging is filtered and sampled too slowly to see individual rotors.</li>
+  <li><strong>Per-motor RPM, current or temperature.</strong> Default logs don't record them.</li>
+  <li><strong>"Safe to fly" or airworthiness.</strong> See section 1.</li>
+  <li><strong>Comparison with other drones or "better than average".</strong> Every number is relative to your drone or a published guide.</li>
+  <li><strong>Wind versus mechanical cause.</strong> Wind isn't measured, so a change can't be split between the two.</li>
+  <li><strong>The cause of a change the user didn't record.</strong> The app can say when something changed, not why.</li>
+  <li><strong>Absolute tuning quality.</strong> Control tracking is only compared with your drone's own history.</li>
+  <li><strong>Payload mass.</strong> It isn't logged.</li>
+  <li><strong>Cross-autopilot equivalence.</strong> PX4 and ArduPilot numbers are never compared with each other.</li>
+  <li><strong>Anything about simulator fidelity.</strong> Comparison with a simulator is planned, not part of the app.</li>
+</ul>
+<h2 id="s3">3. Your responsibilities when you fly</h2>
+<ul>
+  <li><strong>Do your own pre-flight checks</strong> every time, whatever the app says: props, motors, frame, battery, connectors, control response, failsafes and GPS.</li>
+  <li><strong>Follow the aviation rules where you fly.</strong> That includes registration, pilot certification, altitude limits, no-fly zones, permissions and Remote ID where required. The app doesn't check any of them.</li>
+  <li><strong>Decide for yourself.</strong> Whether to fly, repair or retire a drone is your decision. Don't rely on the app as the only reason for it.</li>
+</ul>
+<h2 id="s4">4. Your account</h2>
+<ul>
+  <li>You need an account to upload flights. Give a real email address you can receive mail at, and keep your password to yourself. You're responsible for what happens under your account.</li>
+  <li>One person per account. Don't create accounts for someone else without their permission.</li>
+  <li>The app is not directed at children under 13 (see the privacy policy).</li>
+  <li>We may suspend or delete an account that breaks section 5, or that puts the service or other users at risk. Where it's practical, we'll tell you first by email.</li>
+</ul>
+<h2 id="s5">5. Acceptable use</h2>
+<p>Don't:</p>
+<ul>
+  <li>upload logs you don't have the right to share, or files that aren't flight logs</li>
+  <li>try to break, overload or get around the limits of the server, or reach other users' data</li>
+  <li>use automated tools to scrape the service or create accounts</li>
+  <li>use the app to plan or justify a flight that breaks aviation law</li>
+  <li>misrepresent the app's results, for example by presenting a score as a safety certificate</li>
+</ul>
+<h2 id="s6">6. Your flight logs and data</h2>
+<ul>
+  <li><strong>Your logs and the data in them stay yours.</strong> You don't give us ownership of anything you upload or enter.</li>
+  <li>You give us permission to store and process what you upload <strong>only to run the app for you</strong>: to produce your reports, Trends and baselines, and to show them back to you.</li>
+  <li>We don't sell your data, and we won't use it to build or train models, or share it, without asking you first.</li>
+  <li>What is kept, where, and for how long is set out in the privacy policy: <a href="https://aarushcb.github.io/Drone-Digital-Twin/">aarushcb.github.io/Drone-Digital-Twin/</a></li>
+  <li>You can delete a flight, a drone or your whole account at any time.</li>
+</ul>
+<h2 id="s7">7. The service</h2>
+<ul>
+  <li>The app is free and run by an individual student developer on free hosting. It can be slow to wake up, unavailable, or changed, and it may be discontinued.</li>
+  <li>We don't promise that data will be kept forever. Keep your own copies of any log you care about.</li>
+</ul>
+<h2 id="s8">8. No warranty</h2>
+<p>The app is provided <strong>"as is" and "as available"</strong>, without warranties of any kind, express or implied, including fitness for a particular purpose, accuracy and non-infringement. We don't warrant that its results are correct, complete or suitable for any decision about flying.</p>
+<h2 id="s9">9. Limitation of liability</h2>
+<p>To the fullest extent the law allows, we are <strong>not liable</strong> for any loss or damage arising from your use of the app or from relying on its results. That includes damage to drones or property, injury, crashes, fines, regulatory action, and lost data. Nothing in these terms limits liability that can't be limited by law.</p>
+<h2 id="s10">10. Ending the agreement</h2>
+<ul>
+  <li><strong>You</strong> can end it at any time by deleting your account (in the app: Settings, then Delete account; or at <a href="https://drone-digital-twin-api.onrender.com/account/delete">drone-digital-twin-api.onrender.com/account/delete</a>). Your data is deleted as the privacy policy describes.</li>
+  <li><strong>We</strong> can end it by suspending your account under section 4, or by shutting the service down.</li>
+  <li>Sections 1, 2, 8 and 9 still apply after the agreement ends.</li>
+</ul>
+<h2 id="s11">11. Changes to these terms</h2>
+<p>If these terms change, the new version will be posted at the same address with a new date. If you keep using the app after that, you accept the new terms.</p>
+<h2 id="s12">12. Contact</h2>
+<p><a href="mailto:aarushcb.2005@gmail.com">aarushcb.2005@gmail.com</a></p>
+
+<footer>DroneTwinLabs · <a href="./">Privacy policy</a> · <a href="mailto:aarushcb.2005@gmail.com">aarushcb.2005@gmail.com</a></footer>
+</main>
+</body>
+</html>
+
