@@ -9,6 +9,7 @@ Uploads are a job the app polls (see services/health/store.py for why):
   POST /drones/{id}/flights            -> 202 {flight_id, status: "queued"}
   GET  /drones/{id}/flights/{fid}      -> status, plus the report once done
   GET  /drones/{id}/trends             -> spec §4.4 series and callouts
+  DELETE /drones/{id}/flights/{fid}    -> one flight gone, baselines rebuilt
 """
 
 import os
@@ -24,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.api.routes import _get_owned_drone_or_404
 from app.database.database import get_db
-from app.models.health import ConfigEpoch, Flight, Pack
+from app.models.health import ConfigEpoch, FeatureBaseline, Flight, FlightFeature, Pack
 from app.models.user import User
 from app.services.health import epochs as E
 from app.services.health import store
@@ -231,6 +232,30 @@ def get_trends(drone_id: int, db: Session = Depends(get_db), current_user: User 
     callouts."""
     _get_owned_drone_or_404(db, drone_id, current_user)
     return store.drone_trends(db, drone_id)
+
+
+@router.delete("/drones/{drone_id}/flights/{flight_id}")
+def delete_flight(drone_id: int, flight_id: int, db: Session = Depends(get_db),
+                  current_user: User = Depends(get_current_user)):
+    """Deletes one flight and its measurements, then rebuilds the drone's
+    baselines and admissions from the flights that remain, so its "normal"
+    no longer includes this flight. An upload still being analysed for it is
+    dropped when its job finds the flight gone (and its file deleted)."""
+    _get_owned_drone_or_404(db, drone_id, current_user)
+    f = db.query(Flight).filter_by(id=flight_id, drone_id=drone_id).first()
+    if f is None:
+        raise HTTPException(status_code=404, detail="Flight not found")
+    features = db.query(FlightFeature).filter_by(flight_id=flight_id).delete(synchronize_session=False)
+    db.delete(f)
+    db.commit()
+    store.persist_analysis(db, drone_id, store.drone_reports(db, drone_id))
+    db.commit()
+    return {
+        "flight_id": flight_id,
+        "deleted": {"flights": 1, "flight_features": features},
+        "flights_remaining": db.query(Flight).filter_by(drone_id=drone_id).count(),
+        "baselines_rebuilt": db.query(FeatureBaseline).filter_by(drone_id=drone_id).count(),
+    }
 
 
 # ---------------------------------------------------------------- configuration changes

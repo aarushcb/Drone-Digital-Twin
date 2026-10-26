@@ -84,7 +84,8 @@ def test_every_endpoint_requires_auth():
              ("get", f"/drones/{d}/flights/1/report"), ("patch", f"/drones/{d}/flights/1"),
              ("post", f"/drones/{d}/config-changes"), ("get", f"/drones/{d}/config-changes"),
              ("post", f"/drones/{d}/packs"), ("get", f"/drones/{d}/packs"), ("patch", f"/drones/{d}/packs/1"),
-             ("delete", f"/drones/{d}/packs/1"), ("get", f"/drones/{d}/trends")]
+             ("delete", f"/drones/{d}/packs/1"), ("get", f"/drones/{d}/trends"),
+             ("delete", f"/drones/{d}/flights/1")]
     for method, path in calls:
         assert getattr(client, method)(path).status_code == 401, (method, path)
     print(f"PASS: all {len(calls)} health endpoints return 401 without a token")
@@ -271,6 +272,41 @@ def test_second_flight_change_declaration_and_pack_reassignment():
     print(f"PASS: 60 MB second log done in {t_job:.2f}s; param change detected ({detected[0]['change_type']}); "
           f"retroactive props change resets vibration (n back to 1); inferred_confirmed resets only act.hover; "
           f"pack reassigned then deleted (flights keep data, pack -> null); baseline cache {cached} rows")
+
+
+def test_deleting_one_flight_removes_it_and_rebuilds_the_baselines():
+    if _skip() or not os.path.exists(REAL2):
+        print("SKIP: real fixtures absent")
+        return
+    h, d = user("pruner")
+    f1, _ = wait(h, d, upload(h, d, REAL1).json()["flight_id"])
+    f2, _ = wait(h, d, upload(h, d, REAL2).json()["flight_id"])
+    assert f1["status"] == f2["status"] == "done"
+    db = SessionLocal()
+    used_f2 = [b for b in db.query(FeatureBaseline).filter_by(drone_id=d) if f2["id"] in b.flight_ids]
+    db.close()
+    assert used_f2, "precondition: the second flight is part of some baseline"
+
+    hx, _ = user("snoop")
+    assert client.delete(f"/drones/{d}/flights/{f2['id']}", headers=hx).status_code == 404
+    r = client.delete(f"/drones/{d}/flights/{f2['id']}", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deleted"] == {"flights": 1, "flight_features": 26} and body["flights_remaining"] == 1
+
+    db = SessionLocal()
+    assert db.query(FlightFeature).filter_by(flight_id=f2["id"]).count() == 0
+    rebuilt = db.query(FeatureBaseline).filter_by(drone_id=d).all()
+    db.close()
+    assert rebuilt and all(f2["id"] not in b.flight_ids for b in rebuilt)       # the normal no longer includes it
+    assert all(b.flight_ids == [f1["id"]] for b in rebuilt if b.kind == "rolling")
+    assert client.get(f"/drones/{d}/flights/{f2['id']}", headers=h).status_code == 404
+    listed = client.get(f"/drones/{d}/flights", headers=h).json()
+    assert [f["id"] for f in listed] == [f1["id"]] and listed[0]["flight_number"] == 1
+    assert client.get(f"/drones/{d}/trends", headers=h).json()["flights"] == 1
+    assert client.delete(f"/drones/{d}/flights/{f2['id']}", headers=h).status_code == 404
+    print(f"PASS: deleting flight 2 removes it and its 26 features; {len(rebuilt)} baseline rows rebuilt from "
+          f"flight 1 alone; another user gets 404")
 
 
 # ---------------------------------------------------------------- schema guard
