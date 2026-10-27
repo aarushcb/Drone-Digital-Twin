@@ -472,6 +472,40 @@ def test_real_fixture_flight_one():
     print(f"PASS: real hex as flight 1 -> \"{rep['verdict']['headline']}\" / \"{rep['findings'][0]['text']}\"")
 
 
+def test_a_flight_that_could_not_be_read_never_reads_as_clean():
+    """E1 on the test logs read "0 of 0 checks OK · Nothing outside PX4's
+    published ranges": reassurance about a flight that wasn't assessed. It
+    must lead with why, show no checks, and say what would fix the next one."""
+    import dataclasses
+    from app.services.health import report as R
+    short = dataclasses.replace(window(False), reasons=["airborne_too_short:49.9s<60s"], airborne_s=49.9)
+    rep = R.analyse([R.FlightInput(1, "px4", features(), short)])[0]
+    assert rep["assessment"]["status"] == "not_assessed"
+    assert rep["verdict"]["headline"] == "Too short to read: 50 s airborne, 60 s needed"
+    assert rep["verdict"]["lines"] == ["Next time, fly at least 60 s between takeoff and landing, with some steady hover."]
+    assert rep["checks"] is None and rep["findings"] == [] and rep["overall_score"] is None
+    said = " ".join([rep["verdict"]["headline"]] + rep["verdict"]["lines"])
+    for reassurance in ("checks OK", "Nothing outside", "In line with"):
+        assert reassurance not in said, reassurance
+    gone = dataclasses.replace(window(False), reasons=["no_airborne_detected"])
+    assert R.analyse([R.FlightInput(1, "px4", features(), gone)])[0]["verdict"]["headline"] == \
+        "Couldn't find a flight in this log: no takeoff detected"
+
+    # Qualified but under 30 s steady: say which measurements are missing and why.
+    reason = "insufficient_steady_flight:25.0s<30s"
+    part = dataclasses.replace(window(True), steady_qualified=False, steady_s=25.0, steady_reason=reason)
+    fs = [dataclasses.replace(f, value=None, label=None, reason=reason)
+          if f.key in ("act.mean", "act.spread", "act.pattern", "act.hover", "pwr.sag_hover", "vib.imbalance") else f
+          for f in features()]
+    a = R.analyse([R.FlightInput(1, "px4", fs, part)])[0]["assessment"]
+    assert a["status"] == "partial" and a["headline"] == "Only 25 s of steady flight, 30 s needed"
+    assert sorted(u["name"] for u in a["unavailable"]) == sorted(
+        ["motor balance", "hover throttle", "voltage sag in hover", "prop imbalance (PX4's detector)"])
+    assert {u["why"] for u in a["unavailable"]} == {"too little steady flight"}
+    assert R.analyse([R.FlightInput(1, "px4", features(), window(True))])[0]["assessment"]["status"] == "full"
+    print("PASS: unreadable flight leads with why and what to do next, no checks; partial names what's missing")
+
+
 def main():
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     passed = 0

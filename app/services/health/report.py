@@ -107,10 +107,15 @@ def _report(i, flights, feats_by_flight, groups, events) -> dict:
     epoch_key = None if epoch_idx is None else events[epoch_idx].key(flights[epoch_start].flight_id)
     n_epoch = sum(1 for j in range(epoch_start, i + 1) if flights[j].window.qualified)
     cold_start = roll.overall is None and n_epoch <= 2
-    checks = S.build_checks(by_key, fl.autopilot) if cold_start else None
-    findings = F.generate(scores)
-    new_events = [e for e in events if e.flight_index == i]
     w = fl.window
+    assessment = F.assessment(w, scores)
+    # A flight that couldn't be read gets no checks, no findings and no
+    # reassurance: an empty check list would read "0 of 0 checks OK".
+    checks = S.build_checks(by_key, fl.autopilot) if cold_start and w.qualified else None
+    findings = F.generate(scores) if w.qualified else []
+    if not w.qualified:
+        prompts = []
+    new_events = [e for e in events if e.flight_index == i]
 
     warnings = list(fl.warnings) + list(w.warnings)
     if not w.steady_qualified and w.qualified:
@@ -146,7 +151,9 @@ def _report(i, flights, feats_by_flight, groups, events) -> dict:
                           "note": e.note, "features_reset": sorted(e.reset_features)} for e in new_events],
         "features": [_feature_json(fs) for fs in scores],
         "findings": [f.to_json() for f in findings],
-        "verdict": F.verdict(findings, checks, n_epoch, roll.overall, fl.autopilot, prompts),
+        "assessment": assessment,
+        "verdict": (F.verdict(findings, checks, n_epoch, roll.overall, fl.autopilot, prompts) if w.qualified
+                    else F.not_assessed_verdict(assessment)),
         "checks": checks,
         "change_prompts": prompts,
         "logging_gaps": S.logging_gaps([fs.feature for fs in scores]),

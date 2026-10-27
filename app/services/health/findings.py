@@ -466,6 +466,68 @@ def verdict(findings: Sequence[Finding], checks: Optional[List[dict]], n_epoch: 
     return out
 
 
+# ---------------------------------------------------------------- what couldn't be assessed
+
+# Plain names for what a short steady phase costs (several features read as
+# one thing to a pilot: mean, spread and pattern are all "motor balance").
+STEADY_ONLY_NAMES = {
+    "act.spread": "motor balance", "act.pattern": "motor balance", "act.mean": "motor balance",
+    "act.hover": "hover throttle", "pwr.sag_hover": "voltage sag in hover",
+    "vib.imbalance": "prop imbalance (PX4's detector)",
+}
+_TOO_SHORT = re.compile(r"airborne_too_short:([0-9.]+)s<([0-9.]+)s")
+
+
+def assessment(window, scores) -> dict:
+    """
+    What this flight could and couldn't be read for, in plain words (the
+    report leads with it when it isn't "full"):
+      not_assessed  the flight didn't qualify: no score, no checks, no findings
+      partial       qualified, but some measurements couldn't be taken
+      full          everything the log carries was measured
+    A flight that couldn't be read must never be summarised as clean.
+    """
+    if not window.qualified:
+        m = next((_TOO_SHORT.match(r) for r in window.reasons if _TOO_SHORT.match(r)), None)
+        if m:
+            got, need = round(float(m.group(1))), round(float(m.group(2)))
+            head = f"Too short to read: {got} s airborne, {need} s needed"
+            nxt = f"Next time, fly at least {need} s between takeoff and landing, with some steady hover."
+        elif "no_airborne_detected" in window.reasons:
+            head = "Couldn't find a flight in this log: no takeoff detected"
+            nxt = "Next time, upload the log of a whole flight, from before takeoff to after landing."
+        else:
+            head = "Couldn't read this flight"
+            nxt = "Next time, upload the log of a whole flight, from before takeoff to after landing."
+        out = {"status": "not_assessed", "headline": head, "next_flight": nxt, "unavailable": []}
+    elif not window.steady_qualified:
+        reason = window.steady_reason or "insufficient_steady_flight"
+        names = list(dict.fromkeys(STEADY_ONLY_NAMES[fs.key] for fs in scores
+                                   if fs.key in STEADY_ONLY_NAMES and fs.feature.reason == reason))
+        if reason.startswith("insufficient_steady_flight"):
+            head = f"Only {round(window.steady_s or 0)} s of steady flight, 30 s needed"
+            why = "too little steady flight"
+            nxt = "Next time, include at least 30 s of steady hover or level flight, 5 s or more at a time."
+        else:
+            head = "This log can't show when the drone was flying steadily"
+            why = "the log doesn't record the rate setpoints or vertical speed"
+            nxt = "Next time, log the default topics, which include rate setpoints and vertical speed."
+        out = {"status": "partial", "headline": head, "next_flight": nxt,
+               "unavailable": [{"name": n, "why": why} for n in names]}
+    else:
+        out = {"status": "full", "headline": None, "next_flight": None, "unavailable": []}
+    assert_report_honest(out, "assessment")
+    return out
+
+
+def not_assessed_verdict(a: dict) -> dict:
+    """The verdict for a flight that couldn't be read: why, and what would make
+    the next one readable. No counts, no "nothing outside the ranges"."""
+    out = {"headline": a["headline"], "lines": [a["next_flight"]], "top_findings": [], "progress": None}
+    assert_report_honest(out, "verdict")
+    return out
+
+
 def prompt_text(feature_key: str, direction: str) -> str:
     name = DISPLAY.get(feature_key, Display(feature_key)).name
     return check_claim(f"Did you change something? {name} has been {direction} for 3 flights in a row.")
