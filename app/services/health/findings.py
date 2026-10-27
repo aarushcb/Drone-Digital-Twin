@@ -494,7 +494,15 @@ def verdict(findings: Sequence[Finding], checks: Optional[List[dict]], n_epoch: 
         prefix = "First flight logged: " if n_epoch == 1 else ""
         head = prefix + (f"{k} of {m} checks OK" + (f", {j} to look at" if failed else ""))
         guide = "PX4's" if autopilot == "px4" else "ArduPilot's"
-        lines = [findings[0].text if findings else f"Nothing outside {guide} published ranges."]
+        # "Nothing outside ... published ranges" is never said beside a context
+        # line: next to a drone in the worst third of the surveyed vibration
+        # distribution it reads as clean, though both statements are true.
+        if findings:
+            lines = [findings[0].text]
+        elif context:
+            lines = []
+        else:
+            lines = [f"Nothing outside {guide} published ranges."]
         lines += list(context)
         lines.append(f"Fly {max(0, 5 - n_epoch)} more to learn your drone's normal.")
     else:

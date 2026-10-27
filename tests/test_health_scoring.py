@@ -193,8 +193,8 @@ def test_flight_one_rules():
     assert fkey(r, "pwr.r_cell")["status"] == "learning" and fkey(r, "pwr.v_cell_min")["status"] == "usage"
     assert r["checks"] and r["verdict"]["headline"] == "First flight logged: 8 of 8 checks OK"
     assert "vibration_level" not in {c["key"] for c in r["checks"]}
-    assert r["verdict"]["lines"] == ["Nothing outside PX4's published ranges.",
-                                     "Vibration 3.5 m/s². Of 23 drones in a small sample of PX4's public logs (likely skewed high), 15 read above 4.9 and 7 above 9.8.",
+    # No "Nothing outside PX4's published ranges" beside the context line.
+    assert r["verdict"]["lines"] == ["Vibration 3.5 m/s². Of 23 drones in a small sample of PX4's public logs (likely skewed high), 15 read above 4.9 and 7 above 9.8.",
                                      "Fly 4 more to learn your drone's normal."], r["verdict"]["lines"]
     print("PASS: flight 1 -> only Position scored; vibration a learning value with its context line; 8 of 8 checks")
 
@@ -480,7 +480,7 @@ def test_real_fixture_flight_one():
     assert rep["overall_score"] is None and rep["subsystem_scores"]["IMU & vibration"] is None
     assert rep["findings"] == []
     assert rep["verdict"]["headline"] == "First flight logged: 8 of 8 checks OK"
-    assert rep["verdict"]["lines"][1] == ("Vibration 5.5 m/s². Of 23 drones in a small sample of PX4's public logs "
+    assert rep["verdict"]["lines"][0] == ("Vibration 5.5 m/s². Of 23 drones in a small sample of PX4's public logs "
                                           "(likely skewed high), 15 read above 4.9 and 7 above 9.8.")
     assert {g["feature"] for g in rep["logging_gaps"]} == {"vib.band_hi", "pwr.cell_delta"}
     print(f"PASS: real hex as flight 1 -> \"{rep['verdict']['headline']}\" / {rep['verdict']['lines']}")
@@ -518,6 +518,18 @@ def test_a_flight_that_could_not_be_read_never_reads_as_clean():
     assert {u["why"] for u in a["unavailable"]} == {"too little steady flight"}
     assert R.analyse([R.FlightInput(1, "px4", features(), window(True))])[0]["assessment"]["status"] == "full"
     print("PASS: unreadable flight leads with why and what to do next, no checks; partial names what's missing")
+
+
+def test_no_reassurance_beside_the_vibration_context_line():
+    """A drone in the worst third of the surveyed distribution (E3, 12.4 m/s²)
+    must not read "Nothing outside PX4's published ranges" above its context
+    line. Without a context line (vibration not measured) the line stays."""
+    r = R.analyse(history(1, overrides_at={0: {"vib.metric_p50": 12.4}}))[0]
+    assert r["verdict"]["lines"][0].startswith("Vibration 12.4 m/s². Of 23 drones"), r["verdict"]["lines"]
+    assert not any(line.startswith("Nothing outside") for line in r["verdict"]["lines"])
+    none = R.analyse(history(1, overrides_at={0: {"vib.metric_p50": None}}))[0]
+    assert none["verdict"]["lines"][0] == "Nothing outside PX4's published ranges.", none["verdict"]["lines"]
+    print("PASS: no 'Nothing outside' beside a context line; kept when there is no context line")
 
 
 def test_clipping_and_imbalance_trigger_are_flight_one_facts_not_scores():
