@@ -31,6 +31,7 @@ class FlightInput:
     log_meta: Dict[str, object] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     when: Optional[str] = None           # ISO date of the flight (log clock, else upload time); Trends labels
+    uploaded_at: Optional[str] = None    # ISO upload time: the report's date when the log has no clock
 
 
 def _observation(fl: FlightInput, f: Feature) -> B.Observation:
@@ -120,7 +121,7 @@ def _report(i, flights, feats_by_flight, groups, events) -> dict:
     report = {
         "schema_version": SCHEMA_VERSION,
         "run": {"flight_id": fl.flight_id, "flight_number": i + 1, "pack_id": fl.pack_id,
-                "epoch_id": epoch_key, "autopilot": fl.autopilot},
+                "epoch_id": epoch_key, "autopilot": fl.autopilot, "uploaded_at": fl.uploaded_at},
         "real_log_meta": fl.log_meta,
         "flight_window": {"qualified": w.qualified, "reasons": w.reasons,
                           "airborne_start_s": None if w.airborne_start_us is None else round(w.airborne_start_us / 1e6, 2),

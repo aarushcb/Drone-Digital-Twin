@@ -592,6 +592,7 @@ def parse_ulog(path: str) -> ParsedLog:
             "samples": int(t.size),
         }
     info = dict(getattr(ulog, "msg_info_dict", {}) or {})
+    start_utc = _ulog_start_utc(ulog, datasets.get("vehicle_gps_position"), info)
     del datasets, instances, ulog
     _parse_fifo_topics(path, signals, warnings)
 
@@ -603,7 +604,7 @@ def parse_ulog(path: str) -> ParsedLog:
         )
 
     pwm_range = act_info.pop("pwm_range", None)
-    meta = _ulog_meta(path, info, signals, params, pwm_range)
+    meta = _ulog_meta(path, info, signals, params, pwm_range, start_utc)
     if not (set(signals) - BOOKKEEPING_SIGNALS):
         raise EmptyLogError(f"{os.path.basename(path)} contains no usable telemetry")
     return ParsedLog(signals=signals, params=params, meta=meta, warnings=warnings,
@@ -877,22 +878,52 @@ def _actual_actuator_count_ulog(act_data: dict, params: dict) -> Tuple[int, str]
     return active, "nonzero_output_heuristic"
 
 
-def _ulog_meta(path, info, signals, params, pwm_range) -> LogMeta:
-    start_utc = None
-    # ULog's own start timestamp is a boot-relative microsecond counter, so
-    # a UTC wall-clock time is only available if the log carries one -- do
-    # not invent one from the file mtime, which is when it was COPIED, not
-    # when it was flown.
-    if "time_ref_utc" in info:
-        try:
-            from datetime import datetime, timezone
+def _utc_iso(us: float) -> Optional[str]:
+    """ISO UTC time for a microsecond epoch, or None if it can't be a real
+    flight date (before 2015 means the clock was never set)."""
+    from datetime import datetime, timezone
+    try:
+        t = datetime.fromtimestamp(us / 1e6, tz=timezone.utc)
+    except (ValueError, OSError, OverflowError):
+        return None
+    return t.isoformat() if t.year >= 2015 else None
 
-            start_utc = datetime.fromtimestamp(
-                int(info["time_ref_utc"]), tz=timezone.utc
-            ).isoformat()
-        except (ValueError, OSError, OverflowError):
-            start_utc = None
 
+def _ulog_start_utc(ulog, gps, info) -> Optional[str]:
+    """
+    When the log started, in UTC, or None.
+
+    THE ULOG HEADER HAS NO DATE ON MOST LOGS. `time_ref_utc` looks like one
+    but is the SDLOG_UTC_OFFSET setting in seconds (PX4's logger writes
+    `_param_sdlog_utc_offset.get() * 60`): a timezone, not a time. Reading it
+    as a date gave 1970 on every real log. In order of preference:
+    1. `boot_time_utc_us`, which newer PX4 writes when it has a clock at
+       start: UTC at boot, plus the boot-relative start timestamp.
+    2. The GPS receiver's `time_utc_usec` on vehicle_gps_position, at the
+       first sample with a 3D fix, wound back by how far into the log that
+       sample came.
+    Never the file's mtime: that is when it was copied, not flown.
+    """
+    start_us = int(getattr(ulog, "start_timestamp", 0) or 0)
+    boot = info.get("boot_time_utc_us")
+    if boot:
+        found = _utc_iso(float(boot) + start_us)
+        if found:
+            return found
+    if gps is None or "time_utc_usec" not in gps.data:
+        return None
+    utc = np.asarray(gps.data["time_utc_usec"], dtype=np.float64)
+    ok = utc > 0
+    if "fix_type" in gps.data:
+        ok &= np.asarray(gps.data["fix_type"]) >= 3
+    hits = np.flatnonzero(ok)
+    if not hits.size:
+        return None
+    k = int(hits[0])
+    return _utc_iso(utc[k] - (float(gps.data["timestamp"][k]) - start_us))
+
+
+def _ulog_meta(path, info, signals, params, pwm_range, start_utc=None) -> LogMeta:
     sim_evidence: List[str] = []
     # PX4 SITL evidence, spec 2.2. SYS_AUTOSTART in the 10000-range is the
     # conventional simulation airframe block; HIL_ topics and a set
@@ -1017,6 +1048,27 @@ ARDUPILOT_BANNER = re.compile(r"^(ArduCopter|ArduPlane|ArduRover|ArduSub|ArduPil
 def ardupilot_firmware(messages: List[str]) -> Optional[str]:
     """The firmware banner from a DataFlash log's MSG stream, or None."""
     return next((m.strip() for m in messages if ARDUPILOT_BANNER.match(m.strip())), None)
+
+
+# GPS time runs ahead of UTC by the leap seconds since 1980-01-06: 18 since
+# 2017-01-01, and IERS has announced none since. Wrong by a whole second if
+# one is ever added, which a flight date can bear.
+GPS_EPOCH_UNIX_S = 315_964_800
+GPS_UTC_LEAP_S = 18
+
+
+def _dataflash_start_utc(collected: Dict[str, Dict[str, List[float]]]) -> Optional[str]:
+    """When a DataFlash log started, in UTC, from the first GPS record with a
+    3D fix (Status >= 3) and a set week, wound back to the log's first TimeUS."""
+    gps = collected.get("GPS") or {}
+    if not all(k in gps for k in ("_t", "Status", "GWk", "GMS")):
+        return None
+    for t_us, status, week, ms in zip(gps["_t"], gps["Status"], gps["GWk"], gps["GMS"]):
+        if status >= 3 and week > 0:
+            first_us = min(b["_t"][0] for b in collected.values() if b.get("_t"))
+            unix_s = GPS_EPOCH_UNIX_S + week * 604_800 + ms / 1000.0 - GPS_UTC_LEAP_S
+            return _utc_iso(unix_s * 1e6 - (t_us - first_us))
+    return None
 
 
 def parse_dataflash(path: str) -> ParsedLog:
@@ -1168,6 +1220,7 @@ def parse_dataflash(path: str) -> ParsedLog:
     duration = max((s.duration_s for s in signals.values()), default=0.0)
     meta = LogMeta(
         source_format=FORMAT_DATAFLASH,
+        start_time_utc=_dataflash_start_utc(collected),
         filename=os.path.basename(path),
         sha256=_sha256(path),
         duration_s=duration,

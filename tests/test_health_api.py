@@ -197,6 +197,10 @@ def test_real_log_upload_poll_report():
     fid = r.json()["flight_id"]
     f, t_job = wait(h, d, fid)
     assert f["status"] == "done", f
+    # The flight's real date, from the GPS clock: Flight Review lists this log's
+    # "Logging Start" as 1788582711 (2026-09-05 04:31:51 UTC).
+    assert str(f["flown_at"]).startswith("2026-09-05T04:31:5"), f["flown_at"]
+    assert f["report"]["run"]["uploaded_at"].endswith("+00:00")            # the fallback date, marked UTC
     rep = f["report"]
     assert rep["schema_version"] == "d1.health.1" and rep["run"]["flight_number"] == 1 and rep["run"]["pack_id"] == pack["id"]
     assert rep["overall_score"] is None and rep["verdict"]["headline"] == "First flight logged: 8 of 9 checks OK, 1 to look at"

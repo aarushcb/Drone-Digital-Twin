@@ -80,9 +80,11 @@ def latest_epoch(db: Session, drone_id: int) -> ConfigEpoch:
 
 
 def ordered_flights(db: Session, drone_id: int) -> List[Flight]:
-    """Flight order is upload order. ponytail: log start times are often
-    missing (the reference log says 1970), so a log uploaded out of order is
-    judged in upload order; sort by flown_at once GPS time is reliable."""
+    """Flight order is upload order, deliberately, even now flown_at is read
+    from the GPS clock: many logs have no fix (no date at all), and a receiver
+    clock can be wrong, so a date is shown when known but never reorders the
+    history baselines are built from. A log uploaded out of order is judged in
+    upload order."""
     return db.query(Flight).filter_by(drone_id=drone_id).order_by(Flight.uploaded_at, Flight.id).all()
 
 
@@ -124,7 +126,9 @@ def _inputs(db: Session, flights: List[Flight]) -> List[R.FlightInput]:
         out.append(R.FlightInput(fl.id, fl.autopilot, feats, _window_of(fl), pack_id=fl.pack_id,
                                  watched=dict(fl.watched_params or {}), log_meta=dict(fl.log_meta or {}),
                                  warnings=[],    # warnings are stored already merged with the window's
-                                 when=(fl.flown_at or fl.uploaded_at).isoformat() if (fl.flown_at or fl.uploaded_at) else None))
+                                 when=(fl.flown_at or fl.uploaded_at).isoformat() if (fl.flown_at or fl.uploaded_at) else None,
+                                 # Stored naive UTC; marked as UTC so a client doesn't read it as local time.
+                                 uploaded_at=fl.uploaded_at.isoformat() + "+00:00" if fl.uploaded_at else None))
     return out
 
 
@@ -248,9 +252,9 @@ def _analyse_log(db: Session, fl: Flight, path: str) -> None:
     feats = extract_features(parsed, w)
     m = parsed.meta
     start = m.start_time_utc
-    flown = None
-    if start and not start.startswith("1970"):      # epoch 0 means the log had no real clock
-        flown = _naive(datetime.fromisoformat(start))
+    # The parser only returns a date from a real clock (GPS fix or boot UTC);
+    # None means the app shows the upload time instead.
+    flown = _naive(datetime.fromisoformat(start)) if start else None
     fl.autopilot = N.autopilot_of(m.source_format)
     fl.firmware_version, fl.airframe, fl.flown_at = m.firmware_version, m.airframe, flown
     fl.qualified, fl.qualify_reasons = w.qualified, list(w.reasons)

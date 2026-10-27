@@ -734,11 +734,16 @@ def write_dataflash_from_ulog(path, source):
     t = grid(5.0)
     bat = [at("batt.voltage_raw", t), at("batt.current_raw", t), at("batt.discharged_mah", t)]
     sats, sacc = at("gps.nsats", t), at("gps.sacc", t)
-    gps_ms0 = 345_600_000   # 4 days into GPS week 2438 (week of 2026-09-27)
+    # GPS week and ms-of-week for the source flight's own start time (GPS time
+    # is UTC + 18 leap seconds), so the converted log carries the same date.
+    from datetime import datetime
+    from app.services.reality_gap.parsers import GPS_EPOCH_UNIX_S, GPS_UTC_LEAP_S
+    gps_s0 = datetime.fromisoformat(p.meta.start_time_utc).timestamp() - GPS_EPOCH_UNIX_S + GPS_UTC_LEAP_S
     for k in range(t.size):
+        gps_s = gps_s0 + (t[k] - t_start) / 1e6
+        week, ms = int(gps_s // 604_800), int(round((gps_s % 604_800) * 1000))
         out += _df_data_message(0x87, "Qfff", [int(t[k])] + [float(v[k]) for v in bat])
-        out += _df_data_message(0x85, "QBIHBf", [int(t[k]), 3, gps_ms0 + int((t[k] - t[0]) / 1000), 2438,
-                                                 int(round(sats[k])), 0.7])
+        out += _df_data_message(0x85, "QBIHBf", [int(t[k]), 3, ms, week, int(round(sats[k])), 0.7])
         out += _df_data_message(0x8B, "Qf", [int(t[k]), float(sacc[k])])
     with open(path, "wb") as fh:
         fh.write(out)

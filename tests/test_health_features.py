@@ -345,6 +345,39 @@ def test_ardupilot_firmware_from_real_vehicle_banners():
     print("PASS: ArduCopter/Plane/Rover/Sub banners read as firmware; mid-message mentions don't")
 
 
+REAL_FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "reality_gap", "real")
+
+
+def test_log_start_time_comes_from_a_clock_not_the_timezone_field():
+    """PX4's time_ref_utc is SDLOG_UTC_OFFSET in seconds (28800 = UTC+8 on
+    px4_641d242a), not a date. The date comes from boot_time_utc_us, else the
+    first GPS sample with a 3D fix, wound back to the start of the log."""
+    import types
+    from app.services.reality_gap.parsers import _dataflash_start_utc, _ulog_start_utc, parse_log
+    ulog = types.SimpleNamespace(start_timestamp=10_000_000)
+    assert _ulog_start_utc(ulog, None, {"time_ref_utc": 28800}) is None
+    gps = types.SimpleNamespace(data={
+        "timestamp": np.array([12_000_000, 13_000_000, 14_000_000]),
+        "fix_type": np.array([0, 3, 3]),
+        "time_utc_usec": np.array([0, 1_788_582_711_000_000, 1_788_582_712_000_000]),
+    })
+    # The first 3D-fix sample is 3 s into the log: start = its UTC minus 3 s.
+    assert _ulog_start_utc(ulog, gps, {"time_ref_utc": 28800}) == "2026-09-05T04:31:48+00:00"
+    assert _ulog_start_utc(ulog, gps, {"boot_time_utc_us": 1_788_582_700_000_000}) == "2026-09-05T04:31:50+00:00"
+    no_fix = types.SimpleNamespace(data=dict(gps.data, fix_type=np.array([0, 2, 2])))
+    assert _ulog_start_utc(ulog, no_fix, {}) is None
+    # DataFlash: GPS week 2438 + 4 days is 2026-10-01 00:00:00 GPS time, which is
+    # 23:59:42 UTC on 30 Sep (18 leap seconds); the fix came 5 s into the log.
+    collected = {"IMU": {"_t": [1_000_000.0]},
+                 "GPS": {"_t": [2_000_000.0, 6_000_000.0], "Status": [1.0, 3.0], "GWk": [0.0, 2438.0],
+                         "GMS": [0.0, 345_600_000.0]}}
+    assert _dataflash_start_utc(collected) == "2026-09-30T23:59:37+00:00"
+    real = os.path.join(REAL_FIXTURES, "px4_777ed799.ulg")
+    if os.path.exists(real):
+        assert parse_log(real).meta.start_time_utc.startswith("2026-09-05T04:31:5")
+    print("PASS: dates from boot_time_utc_us or a GPS fix; time_ref_utc (a timezone) never read as one")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items(), key=lambda kv: list(globals()).index(kv[0]))
              if k.startswith("test_") and callable(v)]
