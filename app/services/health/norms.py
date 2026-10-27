@@ -19,6 +19,10 @@ Kinds of norm:
   USAGE     never scored at any flight count (spec §3.4): a usage note only.
             Min cell voltage vs PX4's *empty* level measures how far the pack
             was flown, not whether it is healthy.
+  CONTEXT   never scored, never "absolutely bad", never a Trends guide line:
+            the value is reported with where a published line sits (spec
+            §3.1, amended 2026-10-27). The vibration level, whose lines judged
+            real drones wrongly more often than not.
 """
 
 from dataclasses import dataclass
@@ -26,7 +30,7 @@ from typing import Dict, Optional, Tuple
 
 CHECKED = "2026-10-25"
 
-GRADED, GATE, BAD_ONLY, USAGE = "graded", "gate", "bad_only", "usage"
+GRADED, GATE, BAD_ONLY, USAGE, CONTEXT = "graded", "gate", "bad_only", "usage", "context"
 HIGHER_IS_WORSE, LOWER_IS_WORSE = "higher_is_worse", "lower_is_worse"
 
 # TODO(calibrate): a failed single-edge gate has no published severity; 70
@@ -60,29 +64,37 @@ class Norm:
     confidence: str         # spec §5.2: "low" | "medium" | "high"
     note: str = ""
     uses_detail: Optional[str] = None  # score a Feature.detail field instead of its value
+    context: Optional[Dict[str, object]] = None  # CONTEXT: the evidence behind the context line
 
 
 NORMS: Tuple[Norm, ...] = (
-    Norm("vib.metric_p50", "px4", GRADED, HIGHER_IS_WORSE, 4.905, 9.81, "m/s^2",
+    # CONTEXT, not GRADED (amended 2026-10-27). On a survey of 23 real
+    # vehicles from Flight Review's public index, measured with this
+    # pipeline, 15 sat above 4.905 and 7 at or above 9.81: scored against
+    # these lines, most first flights would be judged wrong. They are Flight
+    # Review's plot shading; PX4's docs give no number. Reported as context,
+    # scored only against the drone's own baseline (flight 3 on).
+    # assets/docs/vibration-guide-survey.md (app repo).
+    Norm("vib.metric_p50", "px4", CONTEXT, HIGHER_IS_WORSE, 4.905, 9.81, "m/s^2",
          "PX4 Flight Review 'Vibration Metrics' plot of vehicle_imu_status.accel_vibration_metric, "
          "background bands green/orange/red at 4.905 and 9.81",
          PX4_FLIGHT_REVIEW_PLOTS, CHECKED, "low",
-         "a visual convention in Flight Review's code, not a documented PX4 limit"),
-    Norm("vib.metric_p50", "ardupilot", GRADED, HIGHER_IS_WORSE, 30.0, 60.0, "m/s^2",
+         "a visual convention in Flight Review's code, not a documented PX4 limit",
+         context={"vehicles": 23, "above_healthy": 15, "above_bad": 7, "median": 5.49,
+                  "surveyed": "2026-10-27", "source": "Flight Review public index, multirotors since 2023",
+                  "bias": "small; uploads skew to logs people wanted checked; metric depends on IMU and filter"}),
+    # ArduPilot's lines are its own documented guidance, but no survey has
+    # tested them; treated the same way so no absolute vibration level is ever
+    # a verdict, and the context line quotes the guide's own words.
+    Norm("vib.metric_p50", "ardupilot", CONTEXT, HIGHER_IS_WORSE, 30.0, 60.0, "m/s^2",
          "ArduPilot 'Measuring Vibration': below 30 normally acceptable, above 60 nearly always problems",
          AP_VIBRATION, CHECKED, "medium",
          "ArduPilot's VIBE is a different computation from PX4's metric; never compared across autopilots"),
-    Norm("vib.clip_rate", "px4", GRADED, HIGHER_IS_WORSE, 0.0, 100.0, "clip events per flight",
-         "ArduPilot 'Measuring Vibration': ideally zero, low numbers (<100) likely ok",
-         AP_VIBRATION, CHECKED, "low",
-         "ArduPilot guidance borrowed for PX4's accel_clipping counters", uses_detail="clip_events"),
-    Norm("vib.clip_rate", "ardupilot", GRADED, HIGHER_IS_WORSE, 0.0, 100.0, "clip events per flight",
-         "ArduPilot 'Measuring Vibration': ideally zero, low numbers (<100) likely ok",
-         AP_VIBRATION, CHECKED, "medium", uses_detail="clip_events"),
-    Norm("vib.imbalance", "px4", BAD_ONLY, HIGHER_IS_WORSE, None, 30.0, "",
-         "PX4 v1.14 FD_IMB_PROP_THR default 30: value at which the imbalanced propeller metric triggers a failure",
-         PX4_FD_PARAMS_114, CHECKED, "medium",
-         "only the failure trigger is published; below it the metric is baseline-only"),
+    # vib.clip_rate and vib.imbalance were absolute norms (ArduPilot's
+    # borrowed "<100 likely ok"; PX4's FD_IMB_PROP_THR 30). They are now
+    # definitional facts (scoring.definitional): any clipping, or the PX4
+    # detector's own trigger, is reported from flight one without making
+    # Vibration a scored subsystem (spec §3.2, §3.4).
     Norm("gps.eph_p50", "px4", GATE, HIGHER_IS_WORSE, 3.0, None, "m",
          "PX4 v1.14 EKF2_REQ_EPH default 3.0 m ('Required EPH to use GPS')",
          PX4_EKF2_PARAMS_114, CHECKED, "medium",
@@ -155,6 +167,8 @@ def absolute_score(feature_key: str, value: Optional[float], autopilot: str,
     x = float(x)
     worse = (lambda edge: x > edge) if norm.direction == HIGHER_IS_WORSE else (lambda edge: x < edge)
 
+    if norm.kind == CONTEXT:
+        return AbsoluteResult(None, "context", norm)
     if norm.kind == USAGE:
         return AbsoluteResult(None, "usage_flown_to_empty" if worse(norm.healthy_edge) else "usage_ok", norm)
     if norm.kind == GATE:

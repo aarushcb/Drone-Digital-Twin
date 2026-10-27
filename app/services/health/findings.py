@@ -58,7 +58,8 @@ FORBIDDEN = [
     (r"\brpm\b|motor (temperature|temp|current)|esc (temperature|temp|current)", "§6.5 per-motor RPM/current/temp"),
     (r"safe to fly|\bunsafe\b|airworth|cleared (for|to) fl|fit to fly|ok to fly|certif", "§6.6 safe to fly"),
     (r"better than (average|most|other)|worse than (average|most|other)|other drones|\bfleet\b|"
-     r"\baverage drone\b|than most drones|percentile", "§6.7 comparison with other drones"),
+     r"\baverage drone\b|than most drones|percentile|\b\d+\s+drones\b|\bmost drones\b|\b(typical|normal) drone\b",
+     "§6.7 comparison with other drones"),
     (r"(due to|because of|caused by) (the )?wind|not (the )?wind|wind,? not|mechanical,? not wind", "§6.8 wind vs mechanical"),
     (r"because you|since you (swapped|changed|replaced|installed)", "§6.9 cause of an unrecorded change"),
     (r"\b(pids?|tune|tuning|gains) (is|are) (bad|good|poor|wrong|off|great)\b|badly tuned|well tuned|poorly tuned|"
@@ -82,9 +83,24 @@ FORBIDDEN_KEYS = {
 PROBABILITY_OPENERS = ("Most often", "Also check", "Worth checking")
 
 
+# THE ONE §6.7 EXCEPTION (spec §6 item 7, amended 2026-10-27). On flights
+# 1-2 the vibration level is reported with where PX4's Flight Review line
+# sits among real drones, because that line otherwise looks like a verdict.
+# It is context for the guide, not a judgement of this aircraft: no score,
+# band or "bad" goes with it. Exactly this sentence, and nothing else that
+# mentions other drones, passes §6.7.
+GUIDE_CONTEXT_PX4 = ("Vibration {v} m/s². Of {n} drones in a small sample of PX4's public logs "
+                     "(likely skewed high), {a} read above {h} and {b} above {bad}.")
+_GUIDE_CONTEXT_RE = re.compile(
+    r"Vibration \d+(\.\d)? m/s²\. Of \d+ drones in a small sample of PX4's public logs "
+    r"\(likely skewed high\), \d+ read above \d+(\.\d)? and \d+ above \d+(\.\d)?\.")
+
+
 def check_claim(text: str) -> str:
     for rx, why in _FORBIDDEN_RE:
         m = rx.search(text)
+        if m and why.startswith("§6.7") and _GUIDE_CONTEXT_RE.fullmatch(text):
+            continue
         if m:
             raise ForbiddenClaim(f"{why}: {m.group(0)!r} in {text!r}")
     return text
@@ -317,7 +333,33 @@ def _definitional_line(fs: FeatureScore) -> str:
     d = DISPLAY[fs.key]
     if fs.definitional == "motor_saturation":
         return _first_fitting([f"Motors at full output {figure(fs.feature.value, d)} of the flight"])
+    if fs.definitional == "accel_clipping":
+        return _first_fitting([f"Clipping {figure(fs.feature.value, d)}: the accelerometer hit its limit"])
+    if fs.definitional == "imbalance_detector":
+        return _first_fitting([f"Prop imbalance {figure(fs.feature.value, d)}, at PX4's detector trigger"])
     return _first_fitting([f"Estimator ratio {figure(fs.feature.value, d)}, past PX4's rejection level"])
+
+
+# The edge each definitional fact is read against (its comparison record).
+DEFINITIONAL_EDGE = {"motor_saturation": 0.0, "estimator_rejection": 1.0, "accel_clipping": 0.0,
+                     "imbalance_detector": 30.0}
+
+
+def guide_context(fs: Optional[FeatureScore], autopilot: str) -> Optional[str]:
+    """The flight-1-2 vibration line: the value and where the published line
+    sits, with the sample's size and bias stated. None once the level is
+    scored against the drone's own baseline, or when it wasn't measured."""
+    if fs is None or fs.feature.value is None or fs.absolute.status != "context":
+        return None
+    n, v = fs.absolute.norm, f"{fs.feature.value:.1f}"
+    if n.context:
+        c = n.context
+        text = GUIDE_CONTEXT_PX4.format(v=v, n=c["vehicles"], a=c["above_healthy"], b=c["above_bad"],
+                                        h=f"{n.healthy_edge:.1f}", bad=f"{n.bad_edge:.1f}")
+    else:
+        text = (f"Vibration {v} m/s². ArduPilot's guide: below {n.healthy_edge:.0f} is normally acceptable, "
+                f"above {n.bad_edge:.0f} nearly always a problem.")
+    return check_claim(text)
 
 
 # ---------------------------------------------------------------- findings
@@ -383,7 +425,7 @@ def finding_for(fs: FeatureScore) -> Optional[Finding]:
     if not emit:
         if fs.definitional:
             return _make(fs, "definitional", _definitional_line(fs),
-                         {"kind": "definition", "edge": 0.0 if fs.key == "act.sat_frac" else 1.0},
+                         {"kind": "definition", "edge": DEFINITIONAL_EDGE[fs.definitional]},
                          fs.confidence or "high")
         return None
     d = DISPLAY[fs.key]
@@ -438,7 +480,7 @@ def generate(scores: Sequence[FeatureScore]) -> List[Finding]:
 # ---------------------------------------------------------------- verdict
 
 def verdict(findings: Sequence[Finding], checks: Optional[List[dict]], n_epoch: int, overall: Optional[float],
-            autopilot: str, prompts: Sequence[dict] = ()) -> dict:
+            autopilot: str, prompts: Sequence[dict] = (), context: Sequence[str] = ()) -> dict:
     """Spec §3.4 (flight one) or §5.1 (worst three) verdict. Every line is
     built from findings that already passed the §6 checks, and is checked
     again here."""
@@ -453,6 +495,7 @@ def verdict(findings: Sequence[Finding], checks: Optional[List[dict]], n_epoch: 
         head = prefix + (f"{k} of {m} checks OK" + (f", {j} to look at" if failed else ""))
         guide = "PX4's" if autopilot == "px4" else "ArduPilot's"
         lines = [findings[0].text if findings else f"Nothing outside {guide} published ranges."]
+        lines += list(context)
         lines.append(f"Fly {max(0, 5 - n_epoch)} more to learn your drone's normal.")
     else:
         top = list(findings[:VERDICT_MAX_FINDINGS])

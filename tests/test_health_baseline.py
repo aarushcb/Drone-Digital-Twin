@@ -47,23 +47,38 @@ def test_every_norm_is_sourced_dated_and_rated():
 
 
 def test_graded_edges_are_exact():
-    s = lambda v: N.absolute_score("vib.metric_p50", v, "px4").score
-    assert s(0) == 100 and abs(s(4.905) - 85) < 1e-9 and abs(s(9.81) - 50) < 1e-9 and s(19.62) == 0
-    assert abs(s(7.3575) - 67.5) < 1e-9          # halfway between edges -> halfway between 85 and 50
-    a = lambda v: N.absolute_score("vib.metric_p50", v, "ardupilot").score
-    assert abs(a(30) - 85) < 1e-9 and abs(a(60) - 50) < 1e-9
-    assert N.absolute_score("vib.metric_p50", 5.47, "px4").status == "watch"   # the reference hex
-    print(f"PASS: PX4 vibration 0/4.905/9.81/19.62 -> 100/85/50/0; reference hex 5.47 -> "
-          f"{s(5.47):.1f} (watch); ArduPilot 30/60 -> 85/50")
+    """The graded curve itself (spec §4.1), still used by any GRADED norm."""
+    g = N.graded_score
+    assert g(0, 4.905, 9.81) == 100 and abs(g(4.905, 4.905, 9.81) - 85) < 1e-9
+    assert abs(g(9.81, 4.905, 9.81) - 50) < 1e-9 and g(19.62, 4.905, 9.81) == 0
+    assert abs(g(7.3575, 4.905, 9.81) - 67.5) < 1e-9     # halfway between edges -> halfway between 85 and 50
+    print("PASS: graded curve 0/healthy/bad/2xbad -> 100/85/50/0")
 
 
-def test_clipping_scores_events_not_rate():
-    c = lambda n: N.absolute_score("vib.clip_rate", 0.0, "px4", {"clip_events": n}).score
-    assert c(0) == 100 and abs(c(100) - 50) < 1e-9 and 84 < c(1) < 85
-    assert N.norm_for("vib.clip_rate", "px4").confidence == "low"         # borrowed from ArduPilot
-    assert N.norm_for("vib.clip_rate", "ardupilot").confidence == "medium"
-    print("PASS: clipping scored on events per flight (0 -> 100, 100 -> 50); low confidence on PX4")
+def test_vibration_level_is_context_never_a_cold_start_score():
+    """Amended 2026-10-27: the 4.9/9.81 lines judged 65%/30% of 23 surveyed real
+    drones; the level is reported as context, never scored or 'absolutely bad'."""
+    for autopilot, v in (("px4", 5.47), ("px4", 20.0), ("ardupilot", 75.0)):
+        r = N.absolute_score("vib.metric_p50", v, autopilot)
+        assert r.score is None and r.status == "context", (autopilot, v, r)
+        assert not N.is_absolute_bad("vib.metric_p50", v, autopilot)    # so it can always join a baseline
+    c = N.norm_for("vib.metric_p50", "px4").context
+    assert (c["vehicles"], c["above_healthy"], c["above_bad"]) == (23, 15, 7)
+    print("PASS: vibration level is context on both autopilots; never scored, never blocks the baseline")
 
+def test_clipping_and_the_imbalance_trigger_are_facts_not_scores():
+    """Clipping (borrowed ArduPilot '<100 likely ok') and PX4's imbalance
+    trigger are reported from flight one as definitional facts (spec §3.2)."""
+    from app.services.health.features import Feature
+    from app.services.health import scoring as S
+    for key in ("vib.clip_rate", "vib.imbalance"):
+        assert N.norm_for(key, "px4") is None and N.norm_for(key, "ardupilot") is None, key
+    clip = lambda n: S.definitional(Feature("vib.clip_rate", "vib", "R1", "1/min", value=n / 10.0,
+                                            detail={"clip_events": n}))
+    assert clip(0) is None and clip(1) == "accel_clipping"
+    imb = lambda v: S.definitional(Feature("vib.imbalance", "vib", "R2", "", value=v))
+    assert imb(29.9) is None and imb(30.0) == "imbalance_detector"
+    print("PASS: any clipping, or PX4's imbalance trigger, is a fact from flight one; neither is a cold-start score")
 
 def test_gates_pass_or_fail_without_invented_severity():
     assert N.absolute_score("gps.eph_p50", 2.9, "px4").score == 100
@@ -74,15 +89,12 @@ def test_gates_pass_or_fail_without_invented_severity():
     print("PASS: single-edge GPS gates -> 100 pass / 70 fail, no invented second edge")
 
 
-def test_bad_only_and_usage_norms():
-    assert N.absolute_score("vib.imbalance", 29.0, "px4").score is None
-    assert N.absolute_score("vib.imbalance", 30.0, "px4").status == "bad"
+def test_usage_norms():
     for v, status in ((3.5, "usage_flown_to_empty"), (3.75, "usage_ok")):
         r = N.absolute_score("pwr.v_cell_min", v, "px4")
         assert r.score is None and r.status == status, r
     assert not N.is_absolute_bad("pwr.v_cell_min", 2.0, "px4")   # usage never counts as a health verdict
-    print("PASS: imbalance only scored at PX4's trigger; min cell voltage never scored (usage note only)")
-
+    print("PASS: min cell voltage never scored (usage note only)")
 
 def test_no_norm_means_no_absolute_score():
     for key in ("act.spread", "trk.att_err_p95", "pwr.r_cell", "vib.band_struct"):

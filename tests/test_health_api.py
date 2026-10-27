@@ -203,7 +203,7 @@ def test_real_log_upload_poll_report():
     assert f["report"]["run"]["uploaded_at"].endswith("+00:00")            # the fallback date, marked UTC
     rep = f["report"]
     assert rep["schema_version"] == "d1.health.1" and rep["run"]["flight_number"] == 1 and rep["run"]["pack_id"] == pack["id"]
-    assert rep["overall_score"] is None and rep["verdict"]["headline"] == "First flight logged: 8 of 9 checks OK, 1 to look at"
+    assert rep["overall_score"] is None and rep["verdict"]["headline"] == "First flight logged: 8 of 8 checks OK"
     assert rep["real_log_meta"]["filename"] == "px4_777ed799.ulg" and rep["flight_window"]["airborne_source"] == "land_detector"
     for gone in ("sim_log_meta", "alignment", "actuator_lag", "resource_usage", "hints", "signals"):
         assert gone not in rep, gone                                       # §4.3: retired fields stay retired

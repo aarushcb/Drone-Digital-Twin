@@ -186,51 +186,64 @@ def test_flight_one_rules():
     r = R.analyse(history(1))[0]
     subs = r["subsystem_scores"]
     assert r["overall_score"] is None and r["score_band"] is None
-    assert subs["IMU & vibration"] is not None and subs["Position & velocity"] is not None
-    assert subs["Actuators"] is None and subs["Attitude & rates"] is None and subs["Power"] is None
+    # Amended 2026-10-27: only Position is scored on flight one (PX4's GPS gates).
+    assert subs["Position & velocity"] is not None
+    assert all(subs[k] is None for k in ("IMU & vibration", "Actuators", "Attitude & rates", "Power")), subs
+    assert fkey(r, "vib.metric_p50")["status"] == "learning"
     assert fkey(r, "pwr.r_cell")["status"] == "learning" and fkey(r, "pwr.v_cell_min")["status"] == "usage"
-    assert r["checks"] and r["verdict"]["headline"].startswith("First flight logged: 9 of 9 checks OK")
-    assert r["verdict"]["lines"] == ["Nothing outside PX4's published ranges.", "Fly 4 more to learn your drone's normal."]
-    print("PASS: flight 1 -> overall null, Vibration and Position scored, Motors/Attitude/Power learning, "
-          "power never scored, checklist verdict")
-
+    assert r["checks"] and r["verdict"]["headline"] == "First flight logged: 8 of 8 checks OK"
+    assert "vibration_level" not in {c["key"] for c in r["checks"]}
+    assert r["verdict"]["lines"] == ["Nothing outside PX4's published ranges.",
+                                     "Vibration 3.5 m/s². Of 23 drones in a small sample of PX4's public logs (likely skewed high), 15 read above 4.9 and 7 above 9.8.",
+                                     "Fly 4 more to learn your drone's normal."], r["verdict"]["lines"]
+    print("PASS: flight 1 -> only Position scored; vibration a learning value with its context line; 8 of 8 checks")
 
 def test_overall_appears_on_flight_three():
     reps = R.analyse(history(3))
     assert reps[1]["overall_score"] is None and reps[2]["overall_score"] is not None
     hover = fkey(reps[2], "act.hover")
     assert hover["mode"] == "blended" and hover["weight"] == 1.0 and hover["n"] == 3
+    # No absolute norm behind vibration now: from flight 3 it is the baseline score alone.
     vib = fkey(reps[2], "vib.metric_p50")
-    assert abs(vib["score"] - round(vib["weight"] * vib["score_baseline"] + (1 - vib["weight"]) * vib["score_absolute"], 1)) <= 0.05
+    assert vib["score_absolute"] is None and vib["weight"] == 1.0 and vib["score"] == vib["score_baseline"]
     assert reps[2]["checks"] is None and reps[2]["subsystems_scored"] == 5
-    print(f"PASS: flight 3 -> overall {reps[2]['overall_score']} (all 5 subsystems), vibration blended "
-          f"{vib['weight']:.3f}*{vib['score_baseline']} + ... = {vib['score']}, no checklist")
+    assert not any("Of 23 drones" in line for line in reps[2]["verdict"]["lines"])   # context is flights 1-2 only
+    print(f"PASS: flight 3 -> overall {reps[2]['overall_score']} (all 5 subsystems), vibration on its baseline "
+          f"alone ({vib['score']}), no checklist, no context line")
 
-
-def test_absolute_bad_capped_forever():
-    bad = {i: {"vib.metric_p50": 12.0} for i in range(10)}
-    reps = R.analyse(history(10, overrides_at=bad))
+def test_steady_high_vibration_is_learned_not_judged_forever():
+    """Amended 2026-10-27. Under the old 9.81 line a drone at 12 m/s² was
+    'absolutely bad': never admitted to its baseline, capped at 49, "consistently
+    high" on every flight. 30% of surveyed real drones sit there. Now its level
+    is its normal, and a change from it is what gets reported."""
+    steady = {i: {"vib.metric_p50": 12.0} for i in range(10)}
+    reps = R.analyse(history(10, overrides_at=steady))
     v = fkey(reps[9], "vib.metric_p50")
-    assert v["score"] <= 49 and v["admitted"] is False
-    f = next(x for x in reps[9]["findings"] if x["key"] == "vib.metric_p50")
-    assert f["kind"] == "consistently_bad" and "every flight so far" in f["line"]
-    assert reps[9]["findings"][0]["key"] == "vib.metric_p50"   # absolute bads sort first
-    print(f"PASS: vibration 12 m/s² on all 10 flights -> score {v['score']} (<= 49), never learned as normal; "
-          f"\"{f['text']}\"")
-
+    assert v["admitted"] is True and v["score"] >= 85 and not v.get("capped")
+    assert not [f for f in reps[9]["findings"] if f["key"] == "vib.metric_p50"]
+    jump = {**steady, 9: {"vib.metric_p50": 18.0}}
+    f = [x for x in R.analyse(history(10, overrides_at=jump))[9]["findings"] if x["key"] == "vib.metric_p50"]
+    assert f and f[0]["kind"] != "consistently_bad", f
+    print(f"PASS: 12 m/s² on every flight -> learned as normal (score {v['score']}); a jump to 18 is the finding")
 
 def test_absolute_bad_caps_a_blend():
-    """The cap must bind when the baseline says 'normal': five admitted
-    flights at 9.6 (just under the 9.81 bad edge), then 9.9 -- z < 1, so
-    S_baseline = 100 and w = 1, yet the value is absolutely bad."""
-    hist = history(6, overrides_at={i: {"vib.metric_p50": 9.6} for i in range(5)})
-    hist[5].features = features({"vib.metric_p50": 9.9}, 0)
-    v = fkey(R.analyse(hist)[5], "vib.metric_p50")
+    """The §3.3 ceiling, kept for any future norm with a published bad edge.
+    No current norm has one (the vibration level is context), so this tests
+    the mechanism with a GRADED norm registered for the test only."""
+    import dataclasses
+    from app.services.health import norms as N
+    key = ("vib.metric_p50", "px4")
+    saved = N._BY_KEY[key]
+    N._BY_KEY[key] = dataclasses.replace(saved, kind=N.GRADED, context=None)
+    try:
+        hist = history(6, overrides_at={i: {"vib.metric_p50": 9.6} for i in range(5)})
+        hist[5].features = features({"vib.metric_p50": 9.9}, 0)
+        v = fkey(R.analyse(hist)[5], "vib.metric_p50")
+    finally:
+        N._BY_KEY[key] = saved
     assert v["score_baseline"] == 100.0 and v["weight"] == 1.0 and v["score_absolute"] < 50
     assert v["capped"] and v["score"] == 49.0
-    print(f"PASS: S_baseline {v['score_baseline']} (normal for this drone) but absolutely bad -> capped at "
-          f"{v['score']} in personal mode")
-
+    print(f"PASS: S_baseline {v['score_baseline']} but absolutely bad under a graded norm -> capped at {v['score']}")
 
 def test_overall_needs_four_subsystems():
     gone = {k: None for k in BASE if k.startswith(("trk.", "gps.", "est."))}
@@ -307,13 +320,13 @@ def test_confidence_and_hedges_follow_spec():
     f = {x["key"]: x for x in reps[11]["findings"]}
     assert f["vib.metric_p50"]["confidence"] == "high" and f["vib.metric_p50"]["text"] == f["vib.metric_p50"]["line"]
     assert f["trk.rate_rms.roll"]["confidence"] == "medium" and f["trk.rate_rms.roll"]["text"].startswith("Looks like ")
-    early = R.analyse(history(1, overrides_at={0: {"vib.metric_p50": 6.0}}))[0]["findings"][0]
-    assert early["confidence"] == "low" and early["text"].startswith("Early read: ")
-    assert all(c["phrase"].startswith("Worth checking") for c in early["causes"])
     assert all(c["phrase"].startswith(("Most often", "Also check")) for c in f["vib.metric_p50"]["causes"])
-    print("PASS: personal R1 n>=10 -> high (no hedge); R2 personal -> medium 'Looks like'; borrowed norm -> "
-          "low 'Early read' with 'Worth checking' causes")
-
+    # Flight one: a vibration level is never a finding now; a GPS gate (medium) is.
+    one = R.analyse(history(1, overrides_at={0: {"vib.metric_p50": 6.0, "gps.eph_p50": 3.4}}))[0]["findings"]
+    assert [x["key"] for x in one] == ["gps.eph_p50"], one
+    assert one[0]["confidence"] == "medium" and one[0]["text"].startswith("Looks like ")
+    print("PASS: personal R1 n>=10 -> high (no hedge); R2 personal -> medium 'Looks like'; flight-one GPS gate "
+          "-> medium; flight-one vibration level -> no finding")
 
 def test_every_finding_carries_the_required_fields():
     reps = R.analyse(history(6, overrides_at={5: {"vib.metric_p50": 5.5, "act.hover": 0.6}}))
@@ -363,7 +376,7 @@ def test_findings_collapse_by_cause():
 def test_checklist_headline_counts_causes():
     r = R.analyse(history(1, overrides_at={0: {"gps.nsats_p10": 4.0, "gps.eph_p50": 3.4}}))[0]
     assert len(r["findings"]) == 1 and r["findings"][0]["cause_group"] == "gps.position"
-    assert r["verdict"]["headline"] == "First flight logged: 7 of 9 checks OK, 1 to look at", r["verdict"]["headline"]
+    assert r["verdict"]["headline"] == "First flight logged: 6 of 8 checks OK, 1 to look at", r["verdict"]["headline"]
     print(f"PASS: two GPS checks fail on flight 1 -> one cause: \"{r['verdict']['headline']}\"")
 
 
@@ -464,12 +477,13 @@ def test_real_fixture_flight_one():
     w = window_flight(p)
     rep = R.analyse([R.FlightInput(1, "px4", extract_features(p, w), w, pack_id=1,
                                    watched=E.watched_params(p.params, p.meta.firmware_version))])[0]
-    assert rep["overall_score"] is None and rep["subsystem_scores"]["IMU & vibration"] is not None
-    assert [f["key"] for f in rep["findings"]] == ["vib.metric_p50"]
-    assert rep["findings"][0]["text"] == "Early read: Vibration 5.5 m/s², above PX4's 4.9 guide"
-    assert rep["verdict"]["headline"] == "First flight logged: 8 of 9 checks OK, 1 to look at"
+    assert rep["overall_score"] is None and rep["subsystem_scores"]["IMU & vibration"] is None
+    assert rep["findings"] == []
+    assert rep["verdict"]["headline"] == "First flight logged: 8 of 8 checks OK"
+    assert rep["verdict"]["lines"][1] == ("Vibration 5.5 m/s². Of 23 drones in a small sample of PX4's public logs "
+                                          "(likely skewed high), 15 read above 4.9 and 7 above 9.8.")
     assert {g["feature"] for g in rep["logging_gaps"]} == {"vib.band_hi", "pwr.cell_delta"}
-    print(f"PASS: real hex as flight 1 -> \"{rep['verdict']['headline']}\" / \"{rep['findings'][0]['text']}\"")
+    print(f"PASS: real hex as flight 1 -> \"{rep['verdict']['headline']}\" / {rep['verdict']['lines']}")
 
 
 def test_a_flight_that_could_not_be_read_never_reads_as_clean():
@@ -504,6 +518,25 @@ def test_a_flight_that_could_not_be_read_never_reads_as_clean():
     assert {u["why"] for u in a["unavailable"]} == {"too little steady flight"}
     assert R.analyse([R.FlightInput(1, "px4", features(), window(True))])[0]["assessment"]["status"] == "full"
     print("PASS: unreadable flight leads with why and what to do next, no checks; partial names what's missing")
+
+
+def test_clipping_and_imbalance_trigger_are_flight_one_facts_not_scores():
+    """Spec §3.2/§3.4 (amended 2026-10-27): any clipping, or PX4's imbalance
+    detector at its own trigger, is a finding from flight one; neither makes
+    Vibration a scored subsystem."""
+    import dataclasses
+    hist = history(1, overrides_at={0: {"vib.imbalance": 31.0}})
+    hist[0].features = [dataclasses.replace(f, value=0.5, detail={"clip_events": 5}) if f.key == "vib.clip_rate" else f
+                        for f in hist[0].features]
+    r = R.analyse(hist)[0]
+    lines = {f["key"]: f["line"] for f in r["findings"]}
+    assert lines["vib.clip_rate"] == "Clipping 0.5 /min: the accelerometer hit its limit", lines
+    assert lines["vib.imbalance"] == "Prop imbalance 31.00, at PX4's detector trigger", lines
+    assert all(f["kind"] == "definitional" for f in r["findings"] if f["key"].startswith("vib."))
+    assert r["subsystem_scores"]["IMU & vibration"] is None
+    status = {c["key"]: c["status"] for c in r["checks"]}
+    assert status["accel_clipping"] == "watch" and status["prop_imbalance"] == "off"
+    print(f"PASS: flight-one facts {sorted(lines)} reported; Vibration still unscored")
 
 
 def main():

@@ -89,6 +89,8 @@ def _with_unit(key: str, text: str) -> str:
 
 def _guides(key: str, autopilot: str) -> List[dict]:
     norm = N.norm_for(key, autopilot)
+    # CONTEXT norms (the vibration level) are context, not guides: no line on
+    # the chart, so no Guide callout either.
     if norm is None or norm.kind not in (N.GRADED, N.BAD_ONLY) or norm.uses_detail:
         return []
     owner = "ArduPilot" if "ardupilot.org" in norm.url else "PX4"

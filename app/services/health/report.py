@@ -152,8 +152,10 @@ def _report(i, flights, feats_by_flight, groups, events) -> dict:
         "features": [_feature_json(fs) for fs in scores],
         "findings": [f.to_json() for f in findings],
         "assessment": assessment,
-        "verdict": (F.verdict(findings, checks, n_epoch, roll.overall, fl.autopilot, prompts) if w.qualified
-                    else F.not_assessed_verdict(assessment)),
+        "verdict": (F.verdict(findings, checks, n_epoch, roll.overall, fl.autopilot, prompts,
+                              context=[c for c in [F.guide_context(by_key.get("vib.metric_p50"), fl.autopilot)] if c]
+                              if checks is not None else ())
+                    if w.qualified else F.not_assessed_verdict(assessment)),
         "checks": checks,
         "change_prompts": prompts,
         "logging_gaps": S.logging_gaps([fs.feature for fs in scores]),

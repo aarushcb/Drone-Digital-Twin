@@ -35,6 +35,7 @@ ABSOLUTE_BAD_CAP = 49.0         # spec §3.3
 SCORED_FROM_N = 3               # spec §3.3: baseline-only features score from n = 3
 CONFIDENCE_HIGH_N = 10          # spec §5.2
 EST_REJECTION_RATIO = 1.0       # PX4 rejects a measurement at test ratio 1 (spec §3.2)
+IMBALANCE_TRIGGER = 30.0        # PX4 v1.14 FD_IMB_PROP_THR default: its own failure trigger (spec §3.2)
 
 
 def blend_weight(n: int) -> float:
@@ -67,6 +68,10 @@ def definitional(feature: Feature) -> Optional[str]:
         return "motor_saturation"
     if feature.key == "est.test_ratio_p95" and feature.value >= EST_REJECTION_RATIO:
         return "estimator_rejection"
+    if feature.key == "vib.clip_rate" and int((feature.detail or {}).get("clip_events", 0)) > 0:
+        return "accel_clipping"
+    if feature.key == "vib.imbalance" and feature.value >= IMBALANCE_TRIGGER:
+        return "imbalance_detector"
     return None
 
 
@@ -254,11 +259,10 @@ def build_checks(scores: Dict[str, FeatureScore], autopilot: str) -> List[dict]:
         return {"key": key, "label": label, "status": status, "figure": figure_fn(v, fs), "basis": basis,
                 "confidence": confidence}
 
-    vib_edge = 4.905 if px4 else 30.0
+    # No vibration-level row (amended 2026-10-27): the level is context on
+    # flights 1-2, not a pass/fail (norms.CONTEXT). Clipping and PX4's
+    # imbalance trigger stay: they are facts, not borrowed lines.
     rows = [
-        row("vibration_level", "Vibration level", "vib.metric_p50", lambda v, f: f"{_fmt(v, 1)} m/s²",
-            lambda v, f: v < vib_edge, f"{'PX4 Flight Review' if px4 else 'ArduPilot'} vibration guide",
-            "low" if px4 else "medium"),
         row("accel_clipping", "Accelerometer clipping", "vib.clip_rate",
             lambda v, f: f"{int(f.feature.detail.get('clip_events', 0))} events",
             lambda v, f: int(f.feature.detail.get("clip_events", 0)) == 0, "ArduPilot clipping guidance", "low"),
@@ -266,7 +270,7 @@ def build_checks(scores: Dict[str, FeatureScore], autopilot: str) -> List[dict]:
     if px4:
         rows += [
             row("prop_imbalance", "Prop imbalance (PX4 detector)", "vib.imbalance", lambda v, f: _fmt(v, 2),
-                lambda v, f: v < 30.0, "PX4 FD_IMB_PROP_THR", "medium"),
+                lambda v, f: v < IMBALANCE_TRIGGER, "PX4 FD_IMB_PROP_THR", "medium", fail_status="off"),
             row("gps_accuracy", "GPS accuracy", "gps.eph_p50", lambda v, f: f"{_fmt(v, 2)} m",
                 lambda v, f: v <= 3.0, "PX4 EKF2_REQ_EPH", "medium"),
             row("gps_satellites", "GPS satellites", "gps.nsats_p10", lambda v, f: f"{int(round(v))}",

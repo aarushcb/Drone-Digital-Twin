@@ -97,14 +97,25 @@ def test_declared_change_is_a_labelled_step_not_a_fault():
 
 
 def test_guide_works_before_a_reference_exists():
-    s = series(T.build(flights([5.3, 5.4, 5.2], key="vib.metric_p50")), "vib.metric_p50")
+    """Amended 2026-10-27: the vibration level is context, so it draws no guide
+    line and raises no Guide callout. The Guide mechanism itself stays for
+    any GRADED norm; tested with one registered for the test only."""
+    import dataclasses
+    from app.services.health import norms as N
+    vib = series(T.build(flights([5.3, 5.4, 5.2], key="vib.metric_p50")), "vib.metric_p50")
+    assert vib["guides"] == [] and vib["callouts"] == [], vib["callouts"]
+    key = ("vib.metric_p50", "px4")
+    saved = N._BY_KEY[key]
+    N._BY_KEY[key] = dataclasses.replace(saved, kind=N.GRADED, context=None)
+    try:
+        s = series(T.build(flights([5.3, 5.4, 5.2], key="vib.metric_p50")), "vib.metric_p50")
+    finally:
+        N._BY_KEY[key] = saved
     assert s["reference"] is None and s["reference_progress"]["have"] == 3
     assert [g["value"] for g in s["guides"]] == [4.905, 9.81] and s["guides"][0]["label"] == "PX4 guide"
     g = [c for c in s["callouts"] if c["kind"] == "guide"]
     assert len(s["callouts"]) == 1 and g and g[0]["label"] == "vs PX4 guide"
-    assert g[0]["text"] == "Vibration past PX4's 4.9 guide on the last 3 flights"
-    print(f"PASS: 3 flights past PX4's line with no reference yet -> Guide only: \"{g[0]['text']}\"")
-
+    print(f"PASS: vibration level draws no guide; a graded norm still gives Guide before a reference: \"{g[0]['text']}\"")
 
 def test_what_is_and_is_not_trended():
     hist = flights([0.5] * 3, packs={1: 2})
