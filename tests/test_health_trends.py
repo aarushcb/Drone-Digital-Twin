@@ -67,6 +67,21 @@ def test_step_fires_on_three_flights_outside_the_band():
     print(f"PASS: 3 flights outside the band -> \"{step[0]['text']}\"; 2 flights -> no Step")
 
 
+def test_a_step_is_not_also_called_a_creep_and_a_creep_is_not_called_a_step():
+    """Three shifted flights pull the median of five past the edge, and a creep
+    that keeps rising puts three in a row outside: each meets the other's
+    condition. Only the one that happened is said (spec §4.4, 2026-10-27)."""
+    def kinds(vals):
+        return [c["kind"] for c in series(T.build(flights(vals)), "act.hover")["callouts"]]
+    jump = [0.50] * 5 + [0.60] * 3                         # crossed the 0.54 edge by 0.10 in one flight
+    assert "step" in kinds(jump) and "drift" not in kinds(jump), kinds(jump)
+    lasting = [0.50] * 5 + [0.60] * 7                      # still a step seven flights later
+    assert "step" in kinds(lasting) and "drift" not in kinds(lasting), kinds(lasting)
+    creep = [0.50] * 5 + [0.50 + 0.006 * k for k in range(1, 11)]   # crossed 0.536 -> 0.542
+    assert "drift" in kinds(creep) and "step" not in kinds(creep), kinds(creep)
+    print(f"PASS: jump -> {kinds(jump)}; lasting step -> {kinds(lasting)}; creep -> {kinds(creep)}")
+
+
 def test_declared_change_is_a_labelled_step_not_a_fault():
     vals = [3.5] * 5 + [4.8] * 4      # band high is 3.5 + 2 x 0.5 = 4.5
     hist = flights(vals, key="vib.metric_p50", when={5: "2026-10-12T09:00:00"})

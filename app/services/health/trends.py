@@ -11,6 +11,8 @@ Callouts, all in feature units:
          on the harmful side                       (needs the reference)
   drift  the median of the last 5 flights in the epoch is outside the band
          on the harmful side                       (needs the reference)
+  When both hold, only one is said: step if the band was crossed by a jump,
+  drift if it was crept across (_abrupt_crossing).
   guide  the last 3 flights are all past a published guide line
                                                    (any n, labelled "vs ... guide")
 
@@ -115,6 +117,20 @@ def _harmful(key: str, v: float, edge: float) -> bool:
     return v > edge if B.DIRECTION[key] != B.LOWER_IS_WORSE else v < edge
 
 
+def _abrupt_crossing(vals: Sequence[float], edge: float, half_width: float, up: bool) -> bool:
+    """Whether the run of flights now outside the band began with a jump: the
+    first flight outside sits at least the band's half-width (2 spreads) beyond
+    the last flight inside it. A creep crosses the edge by a small margin; a
+    step lands well past it. Measured at the crossing, so a step that has lasted
+    many flights still reads as a step. If no flight in the epoch was inside the
+    band, there is no crossing to read and it counts as a step."""
+    inside = [i for i, v in enumerate(vals) if not ((v > edge) if up else (v < edge))]
+    if not inside or inside[-1] == len(vals) - 1:
+        return True
+    last_in, first_out = vals[inside[-1]], vals[inside[-1] + 1]
+    return abs(first_out - last_in) >= half_width
+
+
 def build(flights: Sequence[R.FlightInput], declared: Sequence[E.ConfigEvent] = ()) -> dict:
     flights = list(flights)
     reports = R.analyse(flights, declared)
@@ -187,18 +203,28 @@ def _series(key, pack, per_pack, flights, reports, feat, events, autopilot) -> O
         up = B.DIRECTION[key] != B.LOWER_IS_WORSE
         edge = band["high"] if up else band["low"]
         word = "up" if up else "down"
-        if len(vals) >= STEP_FLIGHTS and all(_harmful(key, v, edge) for v in vals[-STEP_FLIGHTS:]):
+        step = len(vals) >= STEP_FLIGHTS and all(_harmful(key, v, edge) for v in vals[-STEP_FLIGHTS:])
+        med = statistics.median(vals[-DRIFT_FLIGHTS:]) if len(vals) >= DRIFT_FLIGHTS else None
+        drift = med is not None and _harmful(key, med, edge)
+        if step and drift:
+            # Each satisfies the other's condition as a side effect: three
+            # shifted flights pull the median of five past the edge, and a creep
+            # that keeps rising puts three in a row outside. Say the one that
+            # happened, read from how the band was crossed (spec §4.4).
+            if _abrupt_crossing(vals, edge, abs(edge - ref.median), up):
+                drift = False
+            else:
+                step = False
+        if step:
             a, b, c = (_num(key, v) for v in vals[-STEP_FLIGHTS:])
             callouts.append({"kind": "step", "feature": key, "pack_id": pack, "text": F.check_claim(
                 f"{name} stepped {word}: {a}, {b} and {_with_unit(key, c)} on the last 3 flights, outside your "
                 f"usual {_num(key, band['low'])}–{_with_unit(key, _num(key, band['high']))}")})
-        if len(vals) >= DRIFT_FLIGHTS:
-            med = statistics.median(vals[-DRIFT_FLIGHTS:])
-            if _harmful(key, med, edge):
-                since = f" since {start_event}" if start_event else ""
-                callouts.append({"kind": "drift", "feature": key, "pack_id": pack, "text": F.check_claim(
-                    f"{name} has crept {word} from {_num(key, ref.median)} to {_with_unit(key, _num(key, med))} "
-                    f"over {len(vals)} flights{since}")})
+        if drift:
+            since = f" since {start_event}" if start_event else ""
+            callouts.append({"kind": "drift", "feature": key, "pack_id": pack, "text": F.check_claim(
+                f"{name} has crept {word} from {_num(key, ref.median)} to {_with_unit(key, _num(key, med))} "
+                f"over {len(vals)} flights{since}")})
     if guides and len(vals) >= GUIDE_FLIGHTS:
         g = min(guides, key=lambda x: x["value"]) if B.DIRECTION[key] != B.LOWER_IS_WORSE else max(guides, key=lambda x: x["value"])
         if all(_harmful(key, v, g["value"]) for v in vals[-GUIDE_FLIGHTS:]):
