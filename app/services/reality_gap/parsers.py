@@ -41,6 +41,7 @@ VERIFIED, NOT ASSUMED (project rule, CLAUDE.md 7):
 """
 
 import math
+import re
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -1006,6 +1007,18 @@ DATAFLASH_TYPES = sorted(
 )
 
 
+# The boot banner names the vehicle firmware, not "ArduPilot": real logs say
+# "ArduCopter V4.5.7 (2ba6b7aa)", "ArduPlane V4.5.1 (...)" and so on. Older
+# builds and some forks say "APM:Copter" or "ArduPilot". Anchored at the start
+# so a later message that merely mentions a vehicle name doesn't match.
+ARDUPILOT_BANNER = re.compile(r"^(ArduCopter|ArduPlane|ArduRover|ArduSub|ArduPilot|APM)\b")
+
+
+def ardupilot_firmware(messages: List[str]) -> Optional[str]:
+    """The firmware banner from a DataFlash log's MSG stream, or None."""
+    return next((m.strip() for m in messages if ARDUPILOT_BANNER.match(m.strip())), None)
+
+
 def parse_dataflash(path: str) -> ParsedLog:
     """
     Parse an ArduPilot DataFlash (.bin) log into the canonical schema.
@@ -1158,7 +1171,7 @@ def parse_dataflash(path: str) -> ParsedLog:
         filename=os.path.basename(path),
         sha256=_sha256(path),
         duration_s=duration,
-        firmware_version=next((m for m in messages if "ArduPilot" in m or "APM" in m), None),
+        firmware_version=ardupilot_firmware(messages),
         airframe=str(int(params["FRAME_CLASS"])) if "FRAME_CLASS" in params else None,
         sample_counts={k: int(v.t_us.size) for k, v in signals.items()},
         looks_simulated=True if sim_evidence else None,

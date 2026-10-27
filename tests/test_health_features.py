@@ -319,6 +319,32 @@ def test_real_log_every_scored_feature_computes_and_r3_is_null():
           "both R3 features null with reasons")
 
 
+def test_ardupilot_firmware_from_real_vehicle_banners():
+    """Real DataFlash boot banners name the vehicle ("ArduCopter V4.5.7 (2ba6b7aa)"),
+    never "ArduPilot", so the firmware was always missing on real logs."""
+    import tempfile
+    from app.services.reality_gap.parsers import ardupilot_firmware, parse_log
+    from tests.fixtures.reality_gap.make_fixtures import FIXTURE_DIR, _df_data_message, _df_fmt_message
+    for banner in ("ArduCopter V4.5.7 (2ba6b7aa)", "ArduPlane V4.5.1 (f2d4a5e8)", "ArduRover V4.4.0 (c4b9e3b2)",
+                   "ArduSub V4.1.2 (8f9f1d3c)", "APM:Copter V3.6.12 (5ae3c4f0)", "ArduPilot Blimp V4.5.0"):
+        assert ardupilot_firmware(["ChibiOS: 6d2ba67f", banner, "Frame: HEXA/X"]) == banner, banner
+    assert ardupilot_firmware(["ChibiOS: 6d2ba67f", "Frame: HEXA/X", "EKF3 IMU0 is using GPS"]) is None
+    # Not anchored mid-message: a later text that mentions a vehicle isn't a banner.
+    assert ardupilot_firmware(["PreArm: ArduCopter needs GPS"]) is None
+    # End to end: a MSG record appended to the committed DataFlash fixture.
+    with open(os.path.join(FIXTURE_DIR, "synthetic_real.bin"), "rb") as fh:
+        blob = fh.read()
+    blob += _df_fmt_message(0x8C, "MSG", "QZ", ["TimeUS", "Message"])
+    blob += _df_data_message(0x8C, "QZ", [12_000_000, "ArduCopter V4.5.7 (2ba6b7aa)"])
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as fh:
+        fh.write(blob)
+    try:
+        assert parse_log(fh.name).meta.firmware_version == "ArduCopter V4.5.7 (2ba6b7aa)"
+    finally:
+        os.unlink(fh.name)
+    print("PASS: ArduCopter/Plane/Rover/Sub banners read as firmware; mid-message mentions don't")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items(), key=lambda kv: list(globals()).index(kv[0]))
              if k.startswith("test_") and callable(v)]
