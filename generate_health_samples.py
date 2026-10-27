@@ -27,6 +27,7 @@ from app.services.health import baseline as B
 from app.services.health import epochs as E
 from app.services.health import norms as N
 from app.services.health import report as R
+from app.services.health import trends as TR
 from app.services.health.features import extract_features
 from app.services.health.windowing import window_flight
 from app.services.reality_gap.parsers import parse_log
@@ -171,5 +172,228 @@ def main():
         print(f"wrote {path}")
 
 
+# ---------------------------------------------------------------------------
+# Test-log reports and Learn's worked examples
+# ---------------------------------------------------------------------------
+#   python3 generate_health_samples.py --test-logs ~/Desktop/drone-test-logs
+# 1. Runs every log made by make_fixtures.py --health-logs through the real
+#    pipeline, grouped and ordered as its README says (one drone per set; each
+#    B fault on its own against A1-A5), and saves each report to reports/.
+# 2. Writes the app's assets/data/worked_examples.json: the fault reports and
+#    the Drift/Step Trends, each with the chart data behind "what it's
+#    comparing", computed with the same baseline code the report uses.
+
+WORKED_EXAMPLES = os.path.join(APP_ROOT, "assets", "data", "worked_examples.json")
+DEMO_BANNER = "Worked example: a demo, not your flight"
+DEMO_PROVENANCE = ("Made for learning. A real 12S hexacopter flight was copied into five normal flights, "
+                   "then {change}. Not a real fault, not your drone, and never added to your flights.")
+
+# (id, file, title, glyph, finding to highlight, what the demo changed, what a builder would check)
+FAULTS = [
+    ("vibration", "B1_vibration-high.ulg", "Vibration high", "vibration", "vib.metric_p50",
+     "one more with its vibration raised 1.6x",
+     "Check each prop for chips and balance, make sure the prop nuts are tight, and look at the flight controller's mount."),
+    ("motor", "B2_motor4-high.ulg", "One motor working harder", "motor", "act.spread",
+     "one more with motor 4's output raised by 5%",
+     "Spin motor 4 by hand for roughness, check its prop is the right one and undamaged, and look for a bent arm."),
+    ("cg", "B3_motor-pair-high.ulg", "Centre of gravity shifted", "balance", "act.spread",
+     "one more with the rear pair of motors working 3.5% harder and the front pair 3.5% less",
+     "Check where the battery and payload sit; moving the battery forward evens out a rear-heavy drone."),
+    ("pack", "B4_pack-resistance-up.ulg", "Pack resistance up", "battery", "pwr.r_cell",
+     "one more with the pack's internal resistance raised 1.4x",
+     "Watch this pack over the next few flights and compare it with your other packs; check its connector and leads for heat."),
+    ("gps", "B5_gps-poor.ulg", "Poor GPS", "gps", "gps.eph_p50",
+     "one more with GPS accuracy, satellites and speed accuracy degraded below PX4's requirements",
+     "Fly with a clear view of the sky, and move the GPS mast away from power wiring and the video transmitter."),
+    ("saturated", "B6_motor-saturated.ulg", "A motor maxed out", "speed", "act.spread",
+     "one more with motor 2 needing 1.65x the output, pinning it at full power on hard moves",
+     "Check motor 2 and its prop, and whether the drone carries more than its motors can lift with margin."),
+    ("estimator", "B7_estimator-rejecting.ulg", "Estimator rejecting a sensor", "estimator", "est.test_ratio_p95",
+     "one more with the height test ratio pushed past 1 for 90 s, as a barometer disturbance would",
+     "Look at the barometer: foam over it, and shielding from prop wash and sunlight, are the usual fixes."),
+]
+TRENDS = [
+    ("drift", "C", "Vibration creeping up", "trending_up", "vib.metric_p50", "drift",
+     "a vibration rise of 3% of its usual on each flight from the sixth",
+     "A slow climb is worth catching early: look over the props and motor bearings before it becomes a jump."),
+    ("step", "D", "A sudden step", "stairs", "vib.metric_p50", "step",
+     "three flights with vibration 1.5x, as if a damaged prop was left on",
+     "Something changed between flights 5 and 6: check what was swapped, bumped or crashed in between."),
+]
+
+
+def _plain(o):
+    """json.dump fallback: NumPy scalars (np.bool_ from comparisons on float64)
+    become plain Python values; anything else is a bug, not a string."""
+    if hasattr(o, "item"):
+        return o.item()
+    raise TypeError(f"not JSON-serialisable: {type(o).__name__}")
+
+
+def _test_log_inputs(logs_dir):
+    from app.services.reality_gap.parsers import LogParseError
+    cache = {}
+
+    def fi(fid, name):
+        if name not in cache:
+            p = parse_log(os.path.join(logs_dir, name))
+            w = window_flight(p)
+            m = p.meta
+            cache[name] = (N.autopilot_of(m.source_format), extract_features(p, w), w,
+                           {"filename": name, "sha256": m.sha256, "source_format": m.source_format,
+                            "hardware": m.hardware, "firmware_release": m.firmware_release,
+                            "duration_s": round(m.duration_s, 2), "firmware_version": m.firmware_version,
+                            "airframe": m.airframe, "start_time_utc": m.start_time_utc},
+                           E.watched_params(p.params, m.firmware_version))
+        ap, feats, w, meta, watched = cache[name]
+        return R.FlightInput(fid, ap, feats, w, watched=dict(watched), log_meta=meta, when=meta["start_time_utc"])
+    return fi, LogParseError
+
+
+def _chart(history, key, current_value):
+    """The reference band from the first five flights (median +- 2 x spread),
+    the same five behind the finding's "your usual", in display units."""
+    from app.services.health import findings as F
+    obs = [B.Observation(fl.flight_id, next(f.value for f in fl.features if f.key == key), admitted=True)
+           for fl in history[:B.REFERENCE_FLIGHTS]]
+    ref = B.reference_baseline(obs, key)
+    d = F.DISPLAY[key]
+    k = d.scale
+    up = B.DIRECTION[key] != B.LOWER_IS_WORSE
+    return {"feature": key, "label": d.name, "unit": d.unit, "decimals": d.decimals,
+            "baseline_values": [round(o.value * k, 6) for o in obs],
+            "value": round(current_value * k, 6) if current_value is not None else None,
+            "band": {"low": round((ref.median - TR.BAND_SPREADS * ref.spread) * k, 6),
+                     "median": round(ref.median * k, 6),
+                     "high": round((ref.median + TR.BAND_SPREADS * ref.spread) * k, 6)},
+            "higher_is_worse": up,
+            # The band formula can reach below zero; these can't, so the chart starts at 0.
+            "nonnegative": key in NONNEGATIVE,
+            "band_source": "first five flights: median ± 2 × spread"}
+
+
+NONNEGATIVE = {"vib.metric_p50", "act.spread", "pwr.r_cell", "gps.eph_p50", "est.test_ratio_p95", "act.sat_frac"}
+# What each estimator test ratio compares (PX4 EKF2 innovation test ratios).
+ESTIMATOR_CHECK = {"hgt": "the height check, which compares the barometer with the estimate",
+                   "mag": "the heading check, which compares the magnetometer with the estimate",
+                   "vel": "the velocity check, which compares GPS speed with the estimate",
+                   "pos": "the position check, which compares GPS position with the estimate"}
+
+
+def _band_text(key, band, nonnegative):
+    if nonnegative and band["low"] < 0:
+        return f"up to {_figure(key, band['high'])}"
+    return f"{_figure(key, band['low'])} to {_figure(key, band['high'])}"
+
+
+def _figure(key, v):
+    from app.services.health import findings as F
+    return F.figure(v / F.DISPLAY[key].scale, F.DISPLAY[key])
+
+
+def make_test_log_reports(logs_dir):
+    from app.services.health import findings as F
+    fi, LogParseError = _test_log_inputs(logs_dir)
+    out_dir = os.path.join(logs_dir, "reports")
+    os.makedirs(out_dir, exist_ok=True)
+
+    def save(name, obj):
+        with open(os.path.join(out_dir, name), "w") as fh:
+            json.dump(obj, fh, indent=1, ensure_ascii=False, default=_plain)
+
+    a = [fi(i + 1, f"A{i + 1}_normal.ulg") for i in range(5)]
+    for name, rep in zip([f"A{i + 1}_normal.ulg" for i in range(5)], R.analyse(a)):
+        save(name + ".report.json", rep)
+    names = sorted(os.listdir(logs_dir))
+    for b in [n for n in names if n.startswith("B")]:
+        save(b + ".report.json", R.analyse(a + [fi(6, b)])[5])
+    for prefix in ("C", "D"):
+        files = [n for n in names if n.startswith(prefix) and n.endswith(".ulg")]
+        hist = [fi(i + 1, n) for i, n in enumerate(files)]
+        for n, rep in zip(files, R.analyse(hist)):
+            save(n + ".report.json", rep)
+        save(f"{prefix}_trends.json", TR.build(hist))
+    e = [fi(i + 1, n) for i, n in enumerate(["E3_always-bad.ulg", "E1_too-short.ulg", "E2_no-steady.ulg"])]
+    for n, rep in zip(["E3_always-bad.ulg", "E1_too-short.ulg", "E2_no-steady.ulg"], R.analyse(e)):
+        save(n + ".report.json", rep)
+    try:
+        fi(1, "E4_corrupt.ulg")
+        save("E4_corrupt.ulg.report.json", {"status": "unexpectedly parsed"})
+    except LogParseError as exc:
+        save("E4_corrupt.ulg.report.json", {"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+    save("E5_ardupilot.bin.report.json", R.analyse([fi(1, "E5_ardupilot.bin")])[0])
+    print(f"wrote {len(os.listdir(out_dir))} reports to {out_dir}")
+
+    # ---- worked examples
+    examples = []
+    for ex_id, fname, title, glyph, key, change, real_world in FAULTS:
+        rep = R.analyse(a + [fi(6, fname)])[5]
+        rep["_sample"] = {"is_sample_data": True, "synthetic": True, "banner_title": DEMO_BANNER,
+                          "purpose": "Worked example in Learn. Not bundled as a flight, never cached.",
+                          "provenance": DEMO_PROVENANCE.format(change=change),
+                          "generated": datetime.date.today().isoformat(),
+                          "generator": "Drone-Digital-Twin/generate_health_samples.py --test-logs"}
+        f = next((x for x in rep["findings"] if x["key"] == key), None)
+        if f is None:
+            raise SystemExit(f"{ex_id}: no {key} finding, so no convincing example")
+        chart = _chart(a, key, f["value"])
+        feat = next(x for x in rep["features"] if x["key"] == key)
+        d = F.DISPLAY[key]
+        spread = _figure(key, feat["baseline"]["spread"] * d.scale)
+        cause = f["causes"][0]["phrase"].rstrip(".") + "." if f["causes"] else ""
+        if key == "est.test_ratio_p95":
+            cause = f"Worst on {ESTIMATOR_CHECK[feat['detail']['worst']]}."
+        lower = d.name if d.name[:3].isupper() else d.name[0].lower() + d.name[1:]
+        comparing = (f"The band is this drone's usual {lower} over its first five flights: "
+                     f"{_band_text(key, chart['band'], chart['nonnegative'])}. This flight: {_figure(key, chart['value'])}.")
+        # The spread is max(1.4826 x MAD, the feature's floor): what the app
+        # allows as normal wobble, not necessarily what was measured.
+        why = (f"The app allows about {spread} of normal flight-to-flight wobble; this flight is "
+               f"{round(feat['z'])} times that above its usual. {cause}")
+        sat = next((x for x in rep["findings"] if x["key"] == "act.sat_frac"), None)
+        if ex_id == "saturated" and sat:
+            # The point of this example is the full output; the general cause is on the finding card.
+            why = why[: why.index("Most often")] + f"It hit full output {sat['figure']} of the flight: no margin left."
+        why = F.check_claim(why)
+        examples.append({"id": ex_id, "kind": "report", "title": title, "glyph": glyph, "symptom": f["line"],
+                         "focus": key, "figure": f["figure"],
+                         "seeing": F.check_claim("The highlighted finding is what the app flags on this flight."),
+                         "comparing": F.check_claim(comparing), "why": why, "real_world": F.check_claim(real_world),
+                         "chart": chart, "report": rep})
+    for ex_id, prefix, title, glyph, key, kind, change, real_world in TRENDS:
+        files = [n for n in sorted(os.listdir(logs_dir)) if n.startswith(prefix) and n.endswith(".ulg")]
+        hist = [fi(i + 1, n) for i, n in enumerate(files)]
+        tr = TR.build(hist)
+        tr["_sample"] = {"is_sample_data": True, "synthetic": True, "banner_title": DEMO_BANNER,
+                         "provenance": DEMO_PROVENANCE.format(change=change).replace(
+                             "five normal flights, then", f"{len(files)} flights: five normal, then")}
+        series = next(x for c in tr["cards"] for x in c["series"] if x["feature"] == key)
+        call = next((c for c in series["callouts"] if c["kind"] == kind), None)
+        if call is None:
+            raise SystemExit(f"{ex_id}: no {kind} callout, so no convincing example")
+        chart = _chart(hist, key, None)
+        chart["later_values"] = [round(p["value"] * F.DISPLAY[key].scale, 6) for p in series["points"][5:]]
+        b = chart["band"]
+        comparing = (f"The band is the first five flights: {_band_text(key, b, chart['nonnegative'])}. "
+                     f"Each dot after it is one more flight.")
+        why = ("No single flight jumped, so each report stayed calm. The median of the last five left the band."
+               if kind == "drift" else
+               "Three flights in a row landed well outside the band, straight after a normal one.")
+        examples.append({"id": ex_id, "kind": "trends", "title": title, "glyph": glyph, "symptom": call["text"],
+                         "focus": key, "callout": kind,
+                         "seeing": F.check_claim(f"The highlighted {kind} callout is what Trends flags across these flights."),
+                         "comparing": F.check_claim(comparing), "why": F.check_claim(why),
+                         "real_world": F.check_claim(real_world), "chart": chart, "trends": tr})
+    with open(WORKED_EXAMPLES, "w") as fh:
+        json.dump({"_generated": {"by": "Drone-Digital-Twin/generate_health_samples.py --test-logs",
+                                  "date": datetime.date.today().isoformat(),
+                                  "logs": "make_fixtures.py --health-logs (perturbed copies of real/px4_777ed799.ulg)"},
+                   "examples": examples}, fh, ensure_ascii=False, separators=(",", ":"), default=_plain)
+    print(f"wrote {WORKED_EXAMPLES} ({os.path.getsize(WORKED_EXAMPLES) / 1024:.0f} KB, {len(examples)} examples)")
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--test-logs":
+        make_test_log_reports(os.path.expanduser(sys.argv[2]))
+    else:
+        main()
