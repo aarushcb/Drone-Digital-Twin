@@ -473,7 +473,356 @@ def main():
         print(f"  {os.path.basename(path):24s} {os.path.getsize(path):>9,d} bytes")
 
 
+# ---------------------------------------------------------------------------
+# Health test logs: the real reference hex, perturbed per scenario
+# ---------------------------------------------------------------------------
+#
+# Run:  python3 tests/fixtures/reality_gap/make_fixtures.py --health-logs ~/Desktop/drone-test-logs
+#
+# WHY THESE START FROM THE REAL LOG, NOT FROM _mission():
+# The closed-form fixtures above are 60 s, 4-motor and carry none of the health
+# topics (actuator_motors, estimator_status, vehicle_imu_status...), so they
+# can't qualify for a health report at all. These start from real/px4_777ed799.ulg
+# (12S hex, PX4 1.14, 643 s airborne, SDLOG_PROFILE 1), keep only the topics the
+# parser reads (ULOG_TOPICS: a lossless round trip, every feature identical),
+# and change one thing per scenario, so everything not under test is real
+# flight data. Written with pyulog's write_ulog, like the fixtures above.
+#
+# Not committed: the real log is gitignored, and so are these.
+
+HEALTH_SEED = 20261027
+REAL_HEX = os.path.join(FIXTURE_DIR, "real", "px4_777ed799.ulg")
+HEX_CELLS = 12
+# Pack resistance the real log fits to (pwr.r_cell 3.58 mOhm/cell x 12 cells).
+HEX_R_PACK_OHM = 3.58e-3 * HEX_CELLS
+# 0-based motor indices by CA_ROTORn_PX in the real log: motors 3 and 5 at
+# PX +0.57 (front), 4 and 6 at PX -0.57 (rear), 1 and 2 at PX 0.
+HEX_FRONT, HEX_REAR = (2, 4), (3, 5)
+SPINNING = 0.05          # actuator_motors below this is idle or disarmed: left alone
+FIRST_FLIGHT_UTC = 1790834400   # 2026-10-01 06:00 UTC; each file is a later day
+
+
+def _load_hex():
+    from pyulog import ULog
+    from app.services.reality_gap.parsers import ULOG_TOPICS
+    return ULog(REAL_HEX, message_name_filter_list=ULOG_TOPICS, disable_str_exceptions=True)
+
+
+def _instances(u, topic):
+    """Every instance of a topic (vehicle_imu_status and estimator_status are
+    logged per IMU / per EKF instance); scenarios change them all alike."""
+    return [d.data for d in u.data_list if d.name == topic]
+
+
+def _set(d, field, values):
+    d[field] = np.asarray(values).astype(d[field].dtype)
+
+
+def _takeoff_us(u):
+    land = _instances(u, "vehicle_land_detected")[0]
+    airborne = np.flatnonzero(land["landed"] == 0)
+    return int(land["timestamp"][airborne[0]])
+
+
+def _flown_at(u, utc_s):
+    """PX4 carries wall-clock time in vehicle_gps_position.time_utc_usec, not
+    in the ULog header (time_ref_utc is SDLOG_UTC_OFFSET in seconds). Shift
+    it so each file has its own flight date; samples without a fix stay 0."""
+    for d in _instances(u, "vehicle_gps_position"):
+        t = d["time_utc_usec"].astype(np.int64)
+        valid = t > 0
+        shift = int(utc_s * 1_000_000) - int(t[valid][0])
+        _set(d, "time_utc_usec", np.where(valid, t + shift, 0))
+
+
+def _vibration(u, factor):
+    """Scale vibration as a mechanical change would: PX4's
+    accel_vibration_metric, and the high-frequency part of the accelerometer
+    (above a 0.1 s moving average, roughly 5 Hz), which feeds the band features."""
+    for d in _instances(u, "vehicle_imu_status"):
+        _set(d, "accel_vibration_metric", d["accel_vibration_metric"] * factor)
+    for d in _instances(u, "sensor_combined"):
+        for ax in range(3):
+            k = f"accelerometer_m_s2[{ax}]"
+            x = d[k].astype(np.float64)
+            slow = np.convolve(x, np.ones(21) / 21.0, mode="same")
+            _set(d, k, slow + (x - slow) * factor)
+
+
+def _motors(u, fn):
+    """Apply fn(index, values) to each spinning motor's actuator_motors output."""
+    for d in _instances(u, "actuator_motors"):
+        for i in range(6):
+            k = f"control[{i}]"
+            x = d[k].astype(np.float64)
+            spin = np.isfinite(x) & (x > SPINNING)
+            _set(d, k, np.where(spin, np.clip(fn(i, x), 0.0, 1.0), x))
+
+
+def _thrust(u, factor):
+    for d in _instances(u, "vehicle_thrust_setpoint"):
+        _set(d, "xyz[2]", d["xyz[2]"] * factor)
+
+
+def _resistance(u, factor):
+    """More internal resistance R drops terminal voltage by dR x I (V = OCV - R I),
+    so the fit in features._resistance reads R x factor."""
+    d_r = (factor - 1.0) * HEX_R_PACK_OHM
+    for d in _instances(u, "battery_status"):
+        for v, i in (("voltage_v", "current_a"), ("voltage_filtered_v", "current_filtered_a")):
+            if v in d and i in d:
+                _set(d, v, d[v].astype(np.float64) - d_r * d[i].astype(np.float64))
+
+
+def _gps(u, rng, eph=None, sats=None, sacc=None):
+    for d in _instances(u, "vehicle_gps_position"):
+        n = d["timestamp"].size
+        slow = np.sin(np.linspace(0, 6 * np.pi, n))   # slowly varying, as real GPS quality does
+        if eph is not None:
+            _set(d, "eph", np.clip(eph * (1 + 0.25 * slow) + rng.normal(0, 0.1 * eph, n), 0.01, None))
+        if sats is not None:
+            _set(d, "satellites_used", np.clip(np.round(sats + 1.2 * slow + rng.normal(0, 0.5, n)), 0, 40))
+        if sacc is not None:
+            _set(d, "s_variance_m_s", np.clip(sacc * (1 + 0.25 * slow) + rng.normal(0, 0.1 * sacc, n), 0.01, None))
+
+
+def _test_ratios(u, factor=1.0, reject=None):
+    """Scale every estimator test ratio; `reject` = (start_s, length_s) after
+    takeoff during which the height test ratio sits at 1.05-1.6, as a baro
+    disturbance the EKF rejects would."""
+    t_off = _takeoff_us(u)
+    for d in _instances(u, "estimator_status"):
+        for k in ("vel_test_ratio", "pos_test_ratio", "hgt_test_ratio", "mag_test_ratio"):
+            _set(d, k, d[k] * factor)
+        if reject:
+            t = (d["timestamp"].astype(np.int64) - t_off) / 1e6
+            m = (t >= reject[0]) & (t < reject[0] + reject[1])
+            bump = 1.05 + 0.55 * np.abs(np.sin(np.linspace(0, 5 * np.pi, int(m.sum()))))
+            h = d["hgt_test_ratio"].astype(np.float64)
+            h[m] = np.maximum(h[m], bump)
+            _set(d, "hgt_test_ratio", h)
+
+
+def _natural(u, rng):
+    """Flight-to-flight variation of a healthy drone: small, and well inside
+    every sigma floor in baseline.py, so a normal flight never reads as a change."""
+    _vibration(u, 1 + float(np.clip(rng.normal(0, 0.025), -0.05, 0.05)))
+    offsets = rng.normal(0, 0.002, 6)
+    _motors(u, lambda i, x: x + offsets[i])
+    _thrust(u, 1 + float(rng.normal(0, 0.006)))
+    _resistance(u, 1 + float(np.clip(rng.normal(0, 0.02), -0.04, 0.04)))
+    _test_ratios(u, 1 + float(np.clip(rng.normal(0, 0.04), -0.08, 0.08)))
+
+
+def _crop(u, end_us):
+    """Keep only samples up to end_us, as a log whose recording stopped there."""
+    for ds in u.data_list:
+        keep = ds.data["timestamp"].astype(np.int64) <= end_us
+        ds.data = {k: v[keep] for k, v in ds.data.items()}
+
+
+def write_health_ulog(path, day, perturb=None, natural=True):
+    """One scenario: the real hex flight on `day` days after FIRST_FLIGHT_UTC,
+    with natural variation and then `perturb(u, rng)` applied."""
+    u = _load_hex()
+    rng = np.random.default_rng([HEALTH_SEED, day])
+    _flown_at(u, FIRST_FLIGHT_UTC + day * 86400 + int(rng.integers(0, 8 * 3600)))
+    if natural:
+        _natural(u, rng)
+    if perturb:
+        perturb(u, rng)
+    u.write_ulog(path)
+    return path
+
+
+def write_corrupt_ulog(path, source, seed):
+    """A valid ULog header (magic, version, timestamp) followed by noise where
+    the definitions should be: identified as ULog, then unparseable."""
+    with open(source, "rb") as fh:
+        header = fh.read(16)
+    noise = np.random.default_rng(seed).integers(0, 256, 2 * 1024 * 1024, dtype=np.uint8).tobytes()
+    with open(path, "wb") as fh:
+        fh.write(header + noise)
+    return path
+
+
+def write_dataflash_from_ulog(path, source):
+    """
+    An ArduPilot DataFlash log of the same real flight, converted from a
+    health ULog so the ArduPilot path runs on 643 s of real dynamics rather
+    than the 60 s closed-form fixture.
+
+    APPROXIMATIONS (it is a conversion, not a recorded ArduPilot log):
+    - VIBE is computed the way ArduPilot defines it (standard deviation of the
+      accelerometer's high-passed output, per axis) from PX4's accelerometer,
+      which PX4 has already low-passed at IMU_ACCEL_CUTOFF (30 Hz); a real
+      ArduPilot IMU log at its own rate would read higher.
+    - Motor outputs are actuator_motors mapped to 1000-2000 us PWM.
+    - No ArduPilot EKF test ratios, attitude setpoint quaternions or GPS eph:
+      the parser doesn't map them for DataFlash, so leaving them out matches
+      what it would see in a real log.
+    """
+    from app.services.reality_gap.parsers import parse_log
+
+    p = parse_log(source)
+    s = p.signals
+    out = bytearray()
+    defs = [
+        (0x81, "PARM", "QNf", ["TimeUS", "Name", "Value"]),
+        (0x82, "ATT", "Qffffff", ["TimeUS", "DesRoll", "Roll", "DesPitch", "Pitch", "DesYaw", "Yaw"]),
+        (0x83, "IMU", "Qffffff", ["TimeUS", "GyrX", "GyrY", "GyrZ", "AccX", "AccY", "AccZ"]),
+        (0x84, "CTUN", "Qf", ["TimeUS", "Alt"]),
+        (0x85, "GPS", "QBIHBf", ["TimeUS", "Status", "GMS", "GWk", "NSats", "HDop"]),
+        (0x86, "RCOU", "Qhhhhhh", ["TimeUS", "C1", "C2", "C3", "C4", "C5", "C6"]),
+        (0x87, "BAT", "Qfff", ["TimeUS", "Volt", "Curr", "CurrTot"]),
+        (0x88, "VIBE", "QfffIII", ["TimeUS", "VibeX", "VibeY", "VibeZ", "Clip0", "Clip1", "Clip2"]),
+        (0x89, "RATE", "Qffff", ["TimeUS", "RDes", "PDes", "YDes", "AOut"]),
+        (0x8A, "XKF1", "Qffffff", ["TimeUS", "VN", "VE", "VD", "PN", "PE", "PD"]),
+        (0x8B, "GPA", "Qf", ["TimeUS", "SAcc"]),
+        (0x8C, "MSG", "QZ", ["TimeUS", "Message"]),
+    ]
+    for mtype, name, fmt, cols in defs:
+        out += _df_fmt_message(mtype, name, fmt, cols)
+    params = [("FRAME_CLASS", 2.0), ("FRAME_TYPE", 1.0)]      # hexa, X
+    for ch in range(1, 7):
+        params += [(f"SERVO{ch}_FUNCTION", 32.0 + ch), (f"SERVO{ch}_MIN", 1000.0), (f"SERVO{ch}_MAX", 2000.0)]
+    for name, value in params:
+        out += _df_data_message(0x81, "QNf", [0, name, value])
+    t_start = int(s["accel.z"].t_us[0])
+    out += _df_data_message(0x8C, "QZ", [t_start, "ArduCopter V4.5.7 (synthetic conversion)"])
+    out += _df_data_message(0x8C, "QZ", [t_start, "Frame: HEXA/X"])
+
+    def grid(rate):
+        t0, t1 = int(s["accel.z"].t_us[0]), int(s["accel.z"].t_us[-1])
+        return np.arange(t0, t1, int(1e6 / rate), dtype=np.int64)
+
+    def at(key, t):
+        sig = s[key]
+        return np.interp(t, sig.t_us.astype(np.float64), sig.values.astype(np.float64))
+
+    def deg(key, t):
+        return np.degrees(at(key, t))
+
+    t = grid(50.0)
+    att = [deg("att.roll", t), deg("att.pitch", t), deg("att.yaw", t)]
+    for k in range(t.size):
+        out += _df_data_message(0x82, "Qffffff", [int(t[k]), float(att[0][k]), float(att[0][k]), float(att[1][k]),
+                                                  float(att[1][k]), float(att[2][k]), float(att[2][k])])
+    t = grid(200.0)
+    imu = [at(k, t) for k in ("gyro.x", "gyro.y", "gyro.z", "accel.x", "accel.y", "accel.z")]
+    for k in range(t.size):
+        out += _df_data_message(0x83, "Qffffff", [int(t[k])] + [float(v[k]) for v in imu])
+    # VIBE at 10 Hz: per-axis standard deviation of the accelerometer above
+    # ~5 Hz over the last 0.5 s (ArduPilot's definition, approximately).
+    acc = imu[3:]
+    hp = [a - np.convolve(a, np.ones(40) / 40.0, mode="same") for a in acc]
+    rms = [np.sqrt(np.convolve(h ** 2, np.ones(100) / 100.0, mode="same")) for h in hp]
+    t_v = grid(10.0)
+    idx = np.searchsorted(t, t_v).clip(0, t.size - 1)
+    for k, i in enumerate(idx):
+        out += _df_data_message(0x88, "QfffIII", [int(t_v[k])] + [float(r[i]) for r in rms] + [0, 0, 0])
+    t = grid(50.0)
+    rate = [deg("rate_sp.roll", t), deg("rate_sp.pitch", t), deg("rate_sp.yaw", t), at("thrust.sp", t)]
+    xkf = [at(k, t) for k in ("vel.x", "vel.y", "vel.z", "pos.x", "pos.y", "pos.z")]
+    alt = at("alt.rel", t)
+    motors = [at(f"act.motor{i}", t) for i in range(6)]
+    for k in range(t.size):
+        out += _df_data_message(0x89, "Qffff", [int(t[k])] + [float(v[k]) for v in rate])
+        out += _df_data_message(0x8A, "Qffffff", [int(t[k])] + [float(v[k]) for v in xkf])
+        out += _df_data_message(0x84, "Qf", [int(t[k]), float(alt[k])])
+        out += _df_data_message(0x86, "Qhhhhhh", [int(t[k])] + [int(1000 + 1000 * np.clip(m[k], 0, 1)) for m in motors])
+    t = grid(5.0)
+    bat = [at("batt.voltage_raw", t), at("batt.current_raw", t), at("batt.discharged_mah", t)]
+    sats, sacc = at("gps.nsats", t), at("gps.sacc", t)
+    gps_ms0 = 345_600_000   # 4 days into GPS week 2438 (week of 2026-09-27)
+    for k in range(t.size):
+        out += _df_data_message(0x87, "Qfff", [int(t[k])] + [float(v[k]) for v in bat])
+        out += _df_data_message(0x85, "QBIHBf", [int(t[k]), 3, gps_ms0 + int((t[k] - t[0]) / 1000), 2438,
+                                                 int(round(sats[k])), 0.7])
+        out += _df_data_message(0x8B, "Qf", [int(t[k]), float(sacc[k])])
+    with open(path, "wb") as fh:
+        fh.write(out)
+    return path
+
+
+def _raise_motor(index, amount):
+    return lambda u, rng: _motors(u, lambda i, x: x + amount if i == index else x)
+
+
+def _cg_rearward(amount):
+    """CG moved rearward: to hold attitude the rear pair (motors 4 and 6, adjacent)
+    works harder and the front pair less, total thrust unchanged (deviation
+    linear in PX). Rearward because the reference hex is already slightly
+    rear-heavy (motors 2/4/6 high): moving its CG forward evens it out, which is
+    a repair, not a fault."""
+    def go(u, rng):
+        _motors(u, lambda i, x: x + amount if i in HEX_REAR else (x - amount if i in HEX_FRONT else x))
+    return go
+
+
+def _saturate(index, gain):
+    """A weak motor: the controller asks it for more, and on climbs and hard
+    manoeuvres it pins at full output."""
+    return lambda u, rng: _motors(u, lambda i, x: x * gain if i == index else x)
+
+
+def health_log_plan():
+    """(filename, builder) in the order the README lists them. Each builder
+    takes the output path."""
+    plan = []
+    day = iter(range(1, 400))
+
+    def ulog(name, perturb=None, natural=True):
+        d = next(day)
+        plan.append((name, lambda p, d=d: write_health_ulog(p, d, perturb, natural)))
+
+    for k in range(1, 6):
+        ulog(f"A{k}_normal.ulg")
+    ulog("B1_vibration-high.ulg", lambda u, rng: _vibration(u, 1.6))
+    ulog("B2_motor4-high.ulg", _raise_motor(3, 0.05))
+    ulog("B3_motor-pair-high.ulg", _cg_rearward(0.035))
+    ulog("B4_pack-resistance-up.ulg", lambda u, rng: _resistance(u, 1.4))
+    ulog("B5_gps-poor.ulg", lambda u, rng: _gps(u, rng, eph=3.6, sats=5.5, sacc=0.75))
+    ulog("B6_motor-saturated.ulg", _saturate(1, 1.65))
+    ulog("B7_estimator-rejecting.ulg", lambda u, rng: _test_ratios(u, reject=(200.0, 90.0)))
+    # Drift: five flat flights, then vibration +3% of its usual per flight.
+    for k in range(1, 15):
+        f = 1.0 + 0.03 * max(0, k - 5)
+        ulog(f"C{k:02d}_drift-{'normal' if k <= 5 else f'vib+{round((f - 1) * 100)}pct'}.ulg",
+             (lambda f: (lambda u, rng: _vibration(u, f)))(f) if f > 1 else None)
+    # Step: five normal, then three with vibration 1.5x (a damaged prop left on).
+    for k in range(1, 9):
+        ulog(f"D{k:02d}_step-{'normal' if k <= 5 else 'shifted'}.ulg",
+             (lambda u, rng: _vibration(u, 1.5)) if k > 5 else None)
+
+    def cropped(after_takeoff_s):
+        return lambda u, rng: _crop(u, _takeoff_us(u) + int(after_takeoff_s * 1e6))
+
+    ulog("E1_too-short.ulg", cropped(50.0))
+    ulog("E2_no-steady.ulg", cropped(90.0))
+    ulog("E3_always-bad.ulg", lambda u, rng: _vibration(u, 2.2))
+    plan.append(("E4_corrupt.ulg", lambda p: write_corrupt_ulog(p, REAL_HEX, HEALTH_SEED)))
+    d5 = next(day)
+    plan.append(("E5_ardupilot.bin", lambda p, d=d5: write_dataflash_from_ulog(
+        p, write_health_ulog(p + ".src.ulg", d))))
+    return plan
+
+
+def make_health_logs(out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    for name, build in health_log_plan():
+        path = os.path.join(out_dir, name)
+        build(path)
+        if os.path.exists(path + ".src.ulg"):
+            os.remove(path + ".src.ulg")
+        print(f"  {name:36s} {os.path.getsize(path) / 1e6:6.1f} MB")
+
+
 if __name__ == "__main__":
-    print("Generating D1 reality-gap fixtures...")
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--health-logs":
+        print("Generating health test logs from the real reference hex...")
+        make_health_logs(os.path.expanduser(sys.argv[2]))
+    else:
+        print("Generating D1 reality-gap fixtures...")
+        main()
     print("Done.")
